@@ -1,0 +1,11 @@
+# Foundry
+out/
+cache/
+broadcast/
+
+# Dependencies (installed via `forge install`, not vendored)
+lib/
+
+# Env / secrets
+.env
+*.log
