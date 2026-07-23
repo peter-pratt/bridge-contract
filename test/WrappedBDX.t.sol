@@ -179,13 +179,16 @@ contract WrappedBDXTest is Test {
 
         // One more in the SAME window exceeds the cap → revert (no rolling burst).
         bytes32 over = keccak256("over");
+        // Sig computed BEFORE expectRevert: _mintSig staticcalls MINT_TAG() through
+        // the proxy, and an inline call would consume the expectRevert.
+        bytes memory overSig = _mintSig(committeePk, alice, 1 * COIN, over);
         vm.expectRevert(WrappedBDX.WindowCap.selector);
-        w.mint(alice, 1 * COIN, over, _mintSig(committeePk, alice, 1 * COIN, over));
+        w.mint(alice, 1 * COIN, over, overSig);
 
         // A few seconds later — still the same calendar window — still capped.
         vm.warp(block.timestamp + 5);
         vm.expectRevert(WrappedBDX.WindowCap.selector);
-        w.mint(alice, 1 * COIN, over, _mintSig(committeePk, alice, 1 * COIN, over));
+        w.mint(alice, 1 * COIN, over, overSig);
 
         // Cross the calendar boundary → the window resets; minting resumes.
         uint256 nextBoundary = (block.timestamp / EPOCH_SECONDS + 1) * EPOCH_SECONDS;
@@ -199,6 +202,8 @@ contract WrappedBDXTest is Test {
     // Redeem (H.3) — emits the exact event the E.2 watcher decodes.
     // =================================================================================
     event RedeemToNative(address indexed from, uint256 amount, bytes beldexAddress);
+    event Rotated(address indexed newSigner, uint64 newKeyEpoch);
+    event BreakGlassSignerSet(address indexed newSigner, uint64 newKeyEpoch);
 
     function test_Redeem_burnsAndEmits() public {
         bytes32 txid = keccak256("dep-redeem");
@@ -216,8 +221,12 @@ contract WrappedBDXTest is Test {
     }
 
     function test_Redeem_perTxMax_reverts() public {
-        bytes32 txid = keccak256("dep-redeem2");
-        w.mint(alice, PER_TX_MAX + 1, txid, _mintSig(committeePk, alice, PER_TX_MAX + 1, txid));
+        // Fund alice past perTxMax with two cap-respecting mints (a single
+        // PER_TX_MAX+1 mint is itself rejected by the mint-side per-tx cap).
+        bytes32 t1 = keccak256("dep-redeem2a");
+        w.mint(alice, PER_TX_MAX, t1, _mintSig(committeePk, alice, PER_TX_MAX, t1));
+        bytes32 t2 = keccak256("dep-redeem2b");
+        w.mint(alice, 2 * COIN, t2, _mintSig(committeePk, alice, 2 * COIN, t2));
         vm.prank(alice);
         vm.expectRevert(WrappedBDX.PerTxCap.selector);
         w.redeemToNative(PER_TX_MAX + 1, "bxSomeAddress");
@@ -317,7 +326,7 @@ contract WrappedBDXTest is Test {
     // =================================================================================
     // Rotation (H.6)
     // =================================================================================
-    function _newSignerPair() internal returns (uint256 pk, address addr) {
+    function _newSignerPair() internal pure returns (uint256 pk, address addr) {
         pk = 0x5165A;
         addr = vm.addr(pk);
     }
@@ -349,8 +358,9 @@ contract WrappedBDXTest is Test {
         bytes32 t2 = keccak256("post-new");
         w.mint(alice, 1 * COIN, t2, _mintSig(newPk, alice, 1 * COIN, t2));
         bytes32 t3 = keccak256("post-old");
+        bytes memory oldSig = _mintSig(committeePk, alice, 1 * COIN, t3);
         vm.expectRevert(WrappedBDX.BadSigner.selector);
-        w.mint(alice, 1 * COIN, t3, _mintSig(committeePk, alice, 1 * COIN, t3));
+        w.mint(alice, 1 * COIN, t3, oldSig);
     }
 
     function test_Rotation_staleEpoch_reverts() public {
@@ -400,6 +410,21 @@ contract WrappedBDXTest is Test {
         w.breakGlassSetSigner(bgSigner, 5);
         assertEq(w.currentSigner(), bgSigner);
         assertEq(w.keyEpoch(), 5);
+    }
+
+    /// H.6.3: a break-glass must emit `Rotated` (in addition to `BreakGlassSignerSet`) so
+    /// the L1 bond-release gate is satisfied uniformly — governance moving the key on-chain
+    /// releases honest departers' bonds even when a refusing minority blocked a hand-off.
+    function test_Rotation_breakGlass_emitsRotatedForBondGate() public {
+        address bgSigner = vm.addr(0xC0DE);
+        vm.expectEmit(true, false, false, true, address(w));
+        emit Rotated(bgSigner, 7);
+        vm.expectEmit(true, false, false, true, address(w));
+        emit BreakGlassSignerSet(bgSigner, 7);
+        vm.prank(admin);
+        w.breakGlassSetSigner(bgSigner, 7);
+        assertEq(w.currentSigner(), bgSigner);
+        assertEq(w.keyEpoch(), 7);
     }
 
     function test_Rotation_breakGlass_onlyAdmin_andMonotonic() public {

@@ -141,7 +141,8 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
 
         __ERC20_init("Wrapped BDX", "wBDX");
         __Pausable_init();
-        __UUPSUpgradeable_init();
+        // NOTE: OZ upgradeable v5 removed __UUPSUpgradeable_init() -- UUPSUpgradeable
+        // is stateless there; inheriting + overriding _authorizeUpgrade is sufficient.
 
         admin = admin_;
         currentSigner = initialSigner;
@@ -266,6 +267,14 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
     /// @notice Break-glass (H.6.2d / H.6.3): admin sets the signer directly when no valid
     ///         hand-off lands (mass exit / refusal). The deliberate fallback, not the
     ///         default path. Still cannot mint — only names the mint authority.
+    ///
+    ///         Emits `Rotated` **in addition to** `BreakGlassSignerSet`: a break-glass is
+    ///         functionally a signer rotation (it advances `keyEpoch`), so the L1
+    ///         bond-release gate (H.6.3) treats "the key moved past your epoch" uniformly,
+    ///         however it moved. This prevents a refusing minority from freezing honest
+    ///         departers' bonds — governance moving the key on-chain releases them too.
+    ///         `BreakGlassSignerSet` is retained so the *provenance* (governance override
+    ///         vs. self-authorized hand-off) stays visible on-chain for audit/telemetry.
     function breakGlassSetSigner(address newSigner, uint64 newKeyEpoch) external onlyAdmin {
         if (newSigner == address(0)) revert ZeroAddress();
         if (newKeyEpoch <= keyEpoch) revert StaleEpoch();
@@ -275,6 +284,7 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
         delete pendingKeyEpoch;
         delete pendingActivateAt;
         rotationVetoed = false;
+        emit Rotated(newSigner, newKeyEpoch);
         emit BreakGlassSignerSet(newSigner, newKeyEpoch);
     }
 
