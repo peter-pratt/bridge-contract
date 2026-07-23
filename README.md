@@ -52,7 +52,11 @@ bytes beldexAddress)` — the exact event `evm_watcher.rs` decodes (`from` index
 
 - **`admin` must be a `TimelockController` + multisig**, never an EOA, never a committee
   signer. It manages the signer set, pause, caps, and upgrades — it can stop the bleeding
-  and rotate signers, but it can never mint.
+  and rotate signers, but it can never mint. `script/DeployWithTimelock.s.sol` wires this
+  production shape (governance multisig = timelock proposer, open executor, min delay), and
+  `test/WrappedBDXTimelock.t.sol` (Phase G.2) proves the flow: direct admin calls revert,
+  every admin action must be scheduled and wait out the delay, and the bond-before-caps
+  guard + UUPS upgrade both flow through the timelock.
 - **Rotation is self-authorizing** (H.6): the outgoing committee signs in the incoming
   one (`rotateSigner`), a challenge window elapses, then anyone `activateRotation`s.
   `vetoRotation` (a freeze trigger) blocks activation on a watcher-detected mismatch.
