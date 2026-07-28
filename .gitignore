@@ -16,3 +16,4 @@ devnet/anvil.pid
 devnet/mint.env
 devnet/rotate.env
 devnet/mint2.env
+.DS_Store
