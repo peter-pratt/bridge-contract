@@ -14,3 +14,4 @@ lib/
 devnet/anvil.log
 devnet/anvil.pid
 devnet/mint.env
+devnet/rotate.env
