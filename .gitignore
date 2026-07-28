@@ -9,3 +9,8 @@ lib/
 # Env / secrets
 .env
 *.log
+
+# local anvil integration run (devnet/01-deploy.sh)
+devnet/anvil.log
+devnet/anvil.pid
+devnet/mint.env
