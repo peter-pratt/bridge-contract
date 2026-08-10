@@ -14,8 +14,20 @@ cd "$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p devnet
 
 # ── inputs ───────────────────────────────────────────────────────────────────
-# The wBDX signer address recovered by all 4 signers in the C.3 Pevm run.
-SIGNER_ADDR="${SIGNER_ADDR:-0x79b76fd41cea1298ec8ca9d02853beae5e165875}"
+# The wBDX signer address = the CURRENT committee's Pevm group address (derive it from
+# the live shares with sign-pevm.sh, or read the `wBDX signer :` line of any Pevm run).
+# Accepted as SIGNER_ADDR or INITIAL_SIGNER (the docs use both). There is deliberately
+# NO default: a silently-stale baked-in address deploys a contract the committee cannot
+# sign for, and the deploy's own sanity check then "passes" against the wrong value.
+SIGNER_ADDR="${SIGNER_ADDR:-${INITIAL_SIGNER:-}}"
+if [ -z "$SIGNER_ADDR" ]; then
+  echo "!! set SIGNER_ADDR (or INITIAL_SIGNER) to the committee's Pevm address, e.g.:" >&2
+  echo "     SIGNER_ADDR=0x<pevm addr> ./devnet/01-deploy.sh" >&2
+  echo "   Get it from the current shares:" >&2
+  echo "     cd ~/Niyas/projects/beldex/utils/local-devnet" >&2
+  echo "     runlog ./sign-pevm.sh raw 0x\$(printf 'ab%.0s' {1..32})   # read 'wBDX signer : 0x…'" >&2
+  exit 1
+fi
 
 # anvil dev account #0 — deployer + admin + mint recipient.
 DEPLOYER_KEY="${DEPLOYER_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
