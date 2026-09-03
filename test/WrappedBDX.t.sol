@@ -46,7 +46,7 @@ contract WrappedBDXTest is Test {
     // ---- signing helpers -----------------------------------------------------------
     function _mintDigest(address to, uint256 amount, bytes32 txid) internal view returns (bytes32) {
         return keccak256(
-            abi.encode(w.MINT_TAG(), block.chainid, address(w), to, amount, txid)
+            abi.encode(w.MINT_TAG(), block.chainid, address(w), to, amount, txid, uint32(0))
         );
     }
 
@@ -63,10 +63,44 @@ contract WrappedBDXTest is Test {
         return _sign(pk, _mintDigest(to, amount, txid));
     }
 
+    /// H-2: digest/signature for a specific gateway output of a Beldex tx.
+    function _mintDigestAt(address to, uint256 amount, bytes32 txid, uint32 outIdx)
+        internal
+        view
+        returns (bytes32)
+    {
+        return keccak256(
+            abi.encode(w.MINT_TAG(), block.chainid, address(w), to, amount, txid, outIdx)
+        );
+    }
+
+    function _mintSigAt(uint256 pk, address to, uint256 amount, bytes32 txid, uint32 outIdx)
+        internal
+        view
+        returns (bytes memory)
+    {
+        return _sign(pk, _mintDigestAt(to, amount, txid, outIdx));
+    }
+
     function _rotateDigest(uint64 newEpoch, address newSigner) internal view returns (bytes32) {
         return keccak256(
             abi.encode(w.ROTATE_TAG(), block.chainid, address(w), newEpoch, newSigner)
         );
+    }
+
+    function _activateDigest(uint64 pendingEpoch, address pendingSigner) internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(w.ACTIVATE_TAG(), block.chainid, address(w), pendingEpoch, pendingSigner)
+        );
+    }
+
+    /// The incoming committee's proof-of-possession over the activation digest.
+    function _activateSig(uint256 pendingPk, uint64 pendingEpoch, address pendingSigner)
+        internal
+        view
+        returns (bytes memory)
+    {
+        return _sign(pendingPk, _activateDigest(pendingEpoch, pendingSigner));
     }
 
     // =================================================================================
@@ -93,21 +127,74 @@ contract WrappedBDXTest is Test {
         bytes memory sig = _mintSig(committeePk, alice, amt, txid);
 
         vm.prank(relayer); // permissionless relay
-        w.mint(alice, amt, txid, sig);
+        w.mint(alice, amt, txid, 0, sig);
 
         assertEq(w.balanceOf(alice), amt);
         assertEq(w.windowMinted(), amt);
-        assertTrue(w.processedDeposits(txid));
+        // H-2: the replay guard is keyed on (beldexTxid, outputIndex), not the bare txid.
+        assertTrue(w.processedDeposits(keccak256(abi.encode(txid, uint32(0)))));
+        assertFalse(w.processedDeposits(txid), "raw txid is no longer the key");
+    }
+
+    /// H-2 REGRESSION: a Beldex tx may pay the gateway up to 15 times (consensus:
+    /// GATEWAY_TX_MAX_OUTPUTS). Every output must mint independently.
+    function test_Mint_everyOutputOfOneBeldexTxMintsIndependently() public {
+        bytes32 txid = keccak256("one-tx-many-outputs");
+        for (uint32 i = 0; i < 15; i++) {
+            address who = address(uint160(0x5000 + i));
+            uint256 amt = (i + 1) * COIN;
+            bytes memory sig = _mintSigAt(committeePk, who, amt, txid, i);
+            w.mint(who, amt, txid, i, sig);
+            assertEq(w.balanceOf(who), amt, "each output mints");
+        }
+    }
+
+    /// H-2: each output is still single-use. Replaying one output reverts, and it does
+    /// not block the others.
+    function test_Mint_perOutputReplayStillReverts() public {
+        bytes32 txid = keccak256("per-output-replay");
+        bytes memory s0 = _mintSigAt(committeePk, alice, 1 * COIN, txid, 0);
+        w.mint(alice, 1 * COIN, txid, 0, s0);
+
+        vm.expectRevert(WrappedBDX.Replay.selector);
+        w.mint(alice, 1 * COIN, txid, 0, s0);
+
+        // A different output of the same tx is unaffected.
+        w.mint(alice, 2 * COIN, txid, 1, _mintSigAt(committeePk, alice, 2 * COIN, txid, 1));
+        assertEq(w.balanceOf(alice), 3 * COIN);
+    }
+
+    /// H-2: outputIndex is bound into the digest — a signature for output 0 cannot be
+    /// re-used to mint output 1.
+    function test_Mint_signatureIsBoundToItsOutputIndex() public {
+        bytes32 txid = keccak256("index-binding");
+        bytes memory sigFor0 = _mintSigAt(committeePk, alice, 1 * COIN, txid, 0);
+        vm.expectRevert(WrappedBDX.BadSigner.selector);
+        w.mint(alice, 1 * COIN, txid, 1, sigFor0);
+    }
+
+    /// H-2 UPGRADE SAFETY: a deposit recorded under the pre-upgrade raw-txid key must
+    /// stay closed, or the upgrade would re-open every historical deposit for a second
+    /// mint. Simulated by writing the legacy key directly into storage.
+    function test_Mint_legacyRawTxidKeyStillBlocks() public {
+        bytes32 txid = keccak256("pre-upgrade-deposit");
+        // slot 6 = processedDeposits; legacy entries were keyed on the raw txid.
+        vm.store(address(w), keccak256(abi.encode(txid, uint256(6))), bytes32(uint256(1)));
+        assertTrue(w.processedDeposits(txid), "legacy entry present");
+
+        bytes memory sig = _mintSigAt(committeePk, alice, 1 * COIN, txid, 0);
+        vm.expectRevert(WrappedBDX.Replay.selector);
+        w.mint(alice, 1 * COIN, txid, 0, sig);
     }
 
     function test_Mint_replayReverts() public {
         bytes32 txid = keccak256("dep-replay");
         uint256 amt = 1_000 * COIN;
         bytes memory sig = _mintSig(committeePk, alice, amt, txid);
-        w.mint(alice, amt, txid, sig);
+        w.mint(alice, amt, txid, 0, sig);
 
         vm.expectRevert(WrappedBDX.Replay.selector);
-        w.mint(alice, amt, txid, sig);
+        w.mint(alice, amt, txid, 0, sig);
     }
 
     function test_Mint_nonSignerReverts() public {
@@ -115,7 +202,7 @@ contract WrappedBDXTest is Test {
         bytes32 txid = keccak256("dep-rogue");
         bytes memory sig = _mintSig(roguePk, alice, 1 * COIN, txid);
         vm.expectRevert(WrappedBDX.BadSigner.selector);
-        w.mint(alice, 1 * COIN, txid, sig);
+        w.mint(alice, 1 * COIN, txid, 0, sig);
     }
 
     function test_Mint_adminCannotMint() public {
@@ -126,7 +213,7 @@ contract WrappedBDXTest is Test {
         bytes memory sig = _mintSig(adminPk, alice, 1 * COIN, txid);
         vm.prank(admin);
         vm.expectRevert(WrappedBDX.BadSigner.selector);
-        w.mint(alice, 1 * COIN, txid, sig);
+        w.mint(alice, 1 * COIN, txid, 0, sig);
     }
 
     function test_Mint_wrongChain_reverts() public {
@@ -136,7 +223,7 @@ contract WrappedBDXTest is Test {
 
         vm.chainId(block.chainid + 1); // domain separation: a different chain's digest differs
         vm.expectRevert(WrappedBDX.BadSigner.selector);
-        w.mint(alice, amt, txid, sig);
+        w.mint(alice, amt, txid, 0, sig);
     }
 
     function test_Mint_wrongContract_reverts() public {
@@ -153,7 +240,7 @@ contract WrappedBDXTest is Test {
         bytes memory sigForW = _mintSig(committeePk, alice, amt, txid); // bound to address(w)
 
         vm.expectRevert(WrappedBDX.BadSigner.selector);
-        w2.mint(alice, amt, txid, sigForW);
+        w2.mint(alice, amt, txid, 0, sigForW);
     }
 
     function test_Mint_perTxCap_reverts() public {
@@ -161,7 +248,7 @@ contract WrappedBDXTest is Test {
         uint256 amt = PER_TX_MAX + 1;
         bytes memory sig = _mintSig(committeePk, alice, amt, txid);
         vm.expectRevert(WrappedBDX.PerTxCap.selector);
-        w.mint(alice, amt, txid, sig);
+        w.mint(alice, amt, txid, 0, sig);
     }
 
     // =================================================================================
@@ -173,7 +260,7 @@ contract WrappedBDXTest is Test {
         uint256 n = WINDOW_CAP / PER_TX_MAX; // 10
         for (uint256 i = 0; i < n; i++) {
             bytes32 txid = keccak256(abi.encode("fill", i));
-            w.mint(alice, PER_TX_MAX, txid, _mintSig(committeePk, alice, PER_TX_MAX, txid));
+            w.mint(alice, PER_TX_MAX, txid, 0, _mintSig(committeePk, alice, PER_TX_MAX, txid));
         }
         assertEq(w.windowMinted(), WINDOW_CAP);
 
@@ -183,18 +270,18 @@ contract WrappedBDXTest is Test {
         // the proxy, and an inline call would consume the expectRevert.
         bytes memory overSig = _mintSig(committeePk, alice, 1 * COIN, over);
         vm.expectRevert(WrappedBDX.WindowCap.selector);
-        w.mint(alice, 1 * COIN, over, overSig);
+        w.mint(alice, 1 * COIN, over, 0, overSig);
 
         // A few seconds later — still the same calendar window — still capped.
         vm.warp(block.timestamp + 5);
         vm.expectRevert(WrappedBDX.WindowCap.selector);
-        w.mint(alice, 1 * COIN, over, overSig);
+        w.mint(alice, 1 * COIN, over, 0, overSig);
 
         // Cross the calendar boundary → the window resets; minting resumes.
         uint256 nextBoundary = (block.timestamp / EPOCH_SECONDS + 1) * EPOCH_SECONDS;
         vm.warp(nextBoundary);
         bytes32 fresh = keccak256("fresh-window");
-        w.mint(alice, PER_TX_MAX, fresh, _mintSig(committeePk, alice, PER_TX_MAX, fresh));
+        w.mint(alice, PER_TX_MAX, fresh, 0, _mintSig(committeePk, alice, PER_TX_MAX, fresh));
         assertEq(w.windowMinted(), PER_TX_MAX);
     }
 
@@ -208,7 +295,7 @@ contract WrappedBDXTest is Test {
     function test_Redeem_burnsAndEmits() public {
         bytes32 txid = keccak256("dep-redeem");
         uint256 amt = 5_000 * COIN;
-        w.mint(alice, amt, txid, _mintSig(committeePk, alice, amt, txid));
+        w.mint(alice, amt, txid, 0, _mintSig(committeePk, alice, amt, txid));
 
         string memory bdxAddr = "bxABCDEFdeadbeef00112233445566778899aabbccddeeff00112233445566778899";
         vm.expectEmit(true, false, false, true, address(w));
@@ -224,9 +311,9 @@ contract WrappedBDXTest is Test {
         // Fund alice past perTxMax with two cap-respecting mints (a single
         // PER_TX_MAX+1 mint is itself rejected by the mint-side per-tx cap).
         bytes32 t1 = keccak256("dep-redeem2a");
-        w.mint(alice, PER_TX_MAX, t1, _mintSig(committeePk, alice, PER_TX_MAX, t1));
+        w.mint(alice, PER_TX_MAX, t1, 0, _mintSig(committeePk, alice, PER_TX_MAX, t1));
         bytes32 t2 = keccak256("dep-redeem2b");
-        w.mint(alice, 2 * COIN, t2, _mintSig(committeePk, alice, 2 * COIN, t2));
+        w.mint(alice, 2 * COIN, t2, 0, _mintSig(committeePk, alice, 2 * COIN, t2));
         vm.prank(alice);
         vm.expectRevert(WrappedBDX.PerTxCap.selector);
         w.redeemToNative(PER_TX_MAX + 1, "bxSomeAddress");
@@ -234,7 +321,7 @@ contract WrappedBDXTest is Test {
 
     function test_Redeem_emptyAddress_reverts() public {
         bytes32 txid = keccak256("dep-redeem3");
-        w.mint(alice, 10 * COIN, txid, _mintSig(committeePk, alice, 10 * COIN, txid));
+        w.mint(alice, 10 * COIN, txid, 0, _mintSig(committeePk, alice, 10 * COIN, txid));
         vm.prank(alice);
         vm.expectRevert(WrappedBDX.BadRedeemAddress.selector);
         w.redeemToNative(1 * COIN, "");
@@ -243,21 +330,52 @@ contract WrappedBDXTest is Test {
     // =================================================================================
     // Pause (H.4) — blocks mint but the admin can still rotate signers.
     // =================================================================================
-    function test_Pause_blocksMint_butRotationStillWorks() public {
+    /// M-4: pause is a real emergency stop — it freezes the mint AUTHORITY as well as
+    /// mint activity. The permissionless rotation path is gated; the admin break-glass
+    /// path is not, so a compromised/dead signer is still replaceable while paused.
+    function test_Pause_blocksMintAndRotation_butNotBreakGlass() public {
         vm.prank(admin);
         w.pause();
 
         bytes32 txid = keccak256("dep-paused");
         bytes memory sig = _mintSig(committeePk, alice, 1 * COIN, txid);
         vm.expectRevert(); // PausableUpgradeable: EnforcedPause
-        w.mint(alice, 1 * COIN, txid, sig);
+        w.mint(alice, 1 * COIN, txid, 0, sig);
 
-        // Rotation is not gated by whenNotPaused: a compromised/dead signer must be
-        // replaceable while paused.
+        // Staging a rotation is now blocked while paused.
         address newSigner = vm.addr(0xD00D);
         bytes memory rot = _sign(committeePk, _rotateDigest(2, newSigner));
+        vm.expectRevert(); // EnforcedPause
         w.rotateSigner(newSigner, 2, rot);
-        assertEq(w.pendingSigner(), newSigner);
+        assertEq(w.pendingSigner(), address(0), "no rotation staged while paused");
+
+        // The deliberate escape hatch still works: admin can repoint the signer.
+        vm.prank(admin);
+        w.breakGlassSetSigner(newSigner, 2);
+        assertEq(w.currentSigner(), newSigner);
+        assertTrue(w.paused(), "still paused");
+    }
+
+    /// M-4: an already-staged rotation cannot be *activated* while paused either —
+    /// otherwise pausing on suspicion of compromise would not stop the cutover.
+    function test_Pause_blocksActivation_ofAnAlreadyStagedRotation() public {
+        (uint256 newPk, address newSigner) = _newSignerPair();
+        w.rotateSigner(newSigner, 2, _sign(committeePk, _rotateDigest(2, newSigner)));
+        vm.warp(w.pendingActivateAt());
+
+        vm.prank(admin);
+        w.pause();
+
+        bytes memory act = _activateSig(newPk, 2, newSigner);
+        vm.expectRevert(); // EnforcedPause
+        w.activateRotation(act);
+        assertEq(w.currentSigner(), committee, "cutover blocked by pause");
+
+        // ...and proceeds normally once unpaused.
+        vm.prank(admin);
+        w.unpause();
+        w.activateRotation(_activateSig(newPk, 2, newSigner));
+        assertEq(w.currentSigner(), newSigner);
     }
 
     // =================================================================================
@@ -300,7 +418,7 @@ contract WrappedBDXTest is Test {
 
         bytes32 txid = keccak256("dep-bg");
         uint256 amt = 3 * COIN;
-        w.mint(alice, amt, txid, _mintSig(0xBEEF, alice, amt, txid));
+        w.mint(alice, amt, txid, 0, _mintSig(0xBEEF, alice, amt, txid));
         assertEq(w.balanceOf(alice), amt);
     }
 
@@ -339,28 +457,29 @@ contract WrappedBDXTest is Test {
         w.rotateSigner(newSigner, 2, rot);
         assertEq(w.pendingSigner(), newSigner);
 
-        // Before the window elapses, activation reverts.
+        // Before the window elapses, activation reverts (state check fires before the sig).
+        bytes memory act = _activateSig(newPk, 2, newSigner);
         vm.expectRevert(WrappedBDX.RotationNotReady.selector);
-        w.activateRotation();
+        w.activateRotation(act);
 
         // Old key still mints during the challenge window.
         bytes32 t1 = keccak256("pre-activate");
-        w.mint(alice, 1 * COIN, t1, _mintSig(committeePk, alice, 1 * COIN, t1));
+        w.mint(alice, 1 * COIN, t1, 0, _mintSig(committeePk, alice, 1 * COIN, t1));
 
-        // After the window, anyone activates.
+        // After the window, anyone relays the incoming committee's liveness proof.
         vm.warp(w.pendingActivateAt());
         vm.prank(relayer);
-        w.activateRotation();
+        w.activateRotation(_activateSig(newPk, 2, newSigner));
         assertEq(w.currentSigner(), newSigner);
         assertEq(w.keyEpoch(), 2);
 
         // New key mints; old key is now rejected (clean cutover).
         bytes32 t2 = keccak256("post-new");
-        w.mint(alice, 1 * COIN, t2, _mintSig(newPk, alice, 1 * COIN, t2));
+        w.mint(alice, 1 * COIN, t2, 0, _mintSig(newPk, alice, 1 * COIN, t2));
         bytes32 t3 = keccak256("post-old");
         bytes memory oldSig = _mintSig(committeePk, alice, 1 * COIN, t3);
         vm.expectRevert(WrappedBDX.BadSigner.selector);
-        w.mint(alice, 1 * COIN, t3, oldSig);
+        w.mint(alice, 1 * COIN, t3, 0, oldSig);
     }
 
     function test_Rotation_staleEpoch_reverts() public {
@@ -391,17 +510,87 @@ contract WrappedBDXTest is Test {
     }
 
     function test_Rotation_vetoedCannotActivate() public {
-        (, address newSigner) = _newSignerPair();
+        (uint256 newPk, address newSigner) = _newSignerPair();
         bytes memory rot = _sign(committeePk, _rotateDigest(2, newSigner));
         w.rotateSigner(newSigner, 2, rot);
 
         vm.prank(admin);
         w.vetoRotation();
 
-        vm.warp(w.pendingActivateAt());
-        vm.expectRevert(WrappedBDX.RotationIsVetoed.selector);
-        w.activateRotation();
+        // H-3: the veto now CANCELS the rotation outright rather than flagging it, so
+        // there is no longer a pending rotation to activate at all.
+        assertEq(w.pendingSigner(), address(0), "veto cancels the pending rotation");
+        assertEq(w.pendingActivateAt(), 0);
+
+        vm.warp(block.timestamp + 3 days);
+        bytes memory act = _activateSig(newPk, 2, newSigner);
+        vm.expectRevert(WrappedBDX.RotationNotReady.selector);
+        w.activateRotation(act);
         assertEq(w.currentSigner(), committee); // unchanged
+    }
+
+    /// H-3 REGRESSION: the original bypass. An arbitrary address replays the outgoing
+    /// committee's still-valid rotate signature to wash out a veto, then replays the
+    /// equally unexpiring activation proof. Both must now fail.
+    function test_Rotation_vetoedProposalCannotBeRevivedByReplay() public {
+        (uint256 newPk, address newSigner) = _newSignerPair();
+        bytes memory rotSig = _sign(committeePk, _rotateDigest(2, newSigner));
+        bytes memory actSig = _activateSig(newPk, 2, newSigner);
+
+        w.rotateSigner(newSigner, 2, rotSig);
+        vm.prank(admin);
+        w.vetoRotation();
+        assertTrue(w.vetoedProposals(keccak256(abi.encode(newSigner, uint64(2)))));
+
+        // Months later, a stranger replays the original signature.
+        vm.warp(block.timestamp + 90 days);
+        vm.prank(address(0xBAD));
+        vm.expectRevert(WrappedBDX.RotationIsVetoed.selector);
+        w.rotateSigner(newSigner, 2, rotSig);
+
+        // Nothing was staged, so the stale activation proof has nothing to activate.
+        vm.prank(address(0xBAD));
+        vm.expectRevert(WrappedBDX.RotationNotReady.selector);
+        w.activateRotation(actSig);
+
+        assertEq(w.currentSigner(), committee, "veto held");
+        assertEq(w.keyEpoch(), 1);
+    }
+
+    /// H-3: a veto blocks only the rejected (signer, epoch). Governance can still hand
+    /// off to a different successor, so the bridge is not bricked by a veto.
+    function test_Rotation_vetoBlocksOnlyTheRejectedProposal() public {
+        (, address rejected) = _newSignerPair();
+        w.rotateSigner(rejected, 2, _sign(committeePk, _rotateDigest(2, rejected)));
+        vm.prank(admin);
+        w.vetoRotation();
+
+        // A different successor at the same epoch is fine.
+        uint256 goodPk = 0xC0D0;
+        address good = vm.addr(goodPk);
+        w.rotateSigner(good, 2, _sign(committeePk, _rotateDigest(2, good)));
+        vm.warp(w.pendingActivateAt());
+        w.activateRotation(_activateSig(goodPk, 2, good));
+        assertEq(w.currentSigner(), good);
+    }
+
+    /// H-3: a veto raised in error can be cleared by the admin, and only the admin.
+    function test_Rotation_clearVetoedProposal_isAdminOnly() public {
+        (uint256 newPk, address newSigner) = _newSignerPair();
+        w.rotateSigner(newSigner, 2, _sign(committeePk, _rotateDigest(2, newSigner)));
+        vm.prank(admin);
+        w.vetoRotation();
+
+        vm.expectRevert(WrappedBDX.NotAdmin.selector);
+        w.clearVetoedProposal(newSigner, 2);
+
+        vm.prank(admin);
+        w.clearVetoedProposal(newSigner, 2);
+
+        w.rotateSigner(newSigner, 2, _sign(committeePk, _rotateDigest(2, newSigner)));
+        vm.warp(w.pendingActivateAt());
+        w.activateRotation(_activateSig(newPk, 2, newSigner));
+        assertEq(w.currentSigner(), newSigner);
     }
 
     function test_Rotation_breakGlassWhenNoHandoff() public {
