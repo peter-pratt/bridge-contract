@@ -79,7 +79,47 @@ if [ -n "$LOGGED" ]; then
   echo "digest cross-check : the committee signed exactly ${ROTATE_DIGEST}"
 fi
 
+# 2b. the INCOMING committee's activation signature (H.6.2b liveness proof). Signed with
+#     shares-next and logged under the `activate` prefix so it does not mix with the rotate
+#     signature above.
+ASIGS="$(grep -h '^Pevm signature:' "$TESTDATA"/activate-sign-*.log 2>/dev/null \
+         | sed 's/^Pevm signature:[[:space:]]*//' | tr -d ' \r' | sort -u || true)"
+ANSIG="$(printf '%s\n' "$ASIGS" | grep -c . || true)"
+if [ "$ANSIG" -eq 0 ]; then
+  echo "!! no incoming-committee activation signature in $TESTDATA/activate-sign-*.log" >&2
+  echo "   The contract now requires the NEW committee to prove liveness before the old" >&2
+  echo "   key is retired (H.6.2b). Produce it with the fresh DKG shares:" >&2
+  echo "     cd <beldex>/utils/local-devnet" >&2
+  echo "     SHARE_SUBDIR=shares-next ACTIVATE=1 runlog ./sign-rotate.sh $ACTIVATE_PREIMAGE" >&2
+  exit 1
+fi
+if [ "$ANSIG" -ne 1 ]; then
+  echo "!! the incoming signers disagreed — $ANSIG distinct activation signatures:" >&2
+  printf '   %s\n' $ASIGS >&2
+  exit 1
+fi
+ARS="$(printf '%s' "$ASIGS")"
+case "$ARS" in 0x*) ;; *) ARS="0x$ARS" ;; esac
+ARSHEX="${ARS#0x}"
+if [ "${#ARSHEX}" -ne 128 ]; then
+  echo "!! activation sig: expected 64 bytes of r||s (128 hex), got $(( ${#ARSHEX} / 2 ))" >&2
+  exit 1
+fi
+# Cross-check the incoming committee signed OUR activation digest, not something else.
+ALOGGED="$(grep -h 'over digest' "$TESTDATA"/activate-sign-*.log 2>/dev/null \
+           | sed 's/.*over digest[[:space:]]*:*[[:space:]]*//' | tr -d ' \r' | sort -u | head -1 || true)"
+if [ -n "$ALOGGED" ] && [ -n "${ACTIVATE_DIGEST:-}" ]; then
+  if [ "$(lower "${ALOGGED#0x}")" != "$(lower "${ACTIVATE_DIGEST#0x}")" ]; then
+    echo "!! the incoming committee signed a different activation digest" >&2
+    echo "   signed   : $ALOGGED" >&2
+    echo "   expected : $ACTIVATE_DIGEST" >&2
+    exit 1
+  fi
+  echo "activation digest  : the incoming committee signed exactly ${ACTIVATE_DIGEST}"
+fi
+
 echo "signature          : $RS"
+echo "activation sig     : $ARS"
 echo "outgoing signer    : $OUTGOING_SIGNER  (keyEpoch $CUR_KEY_EPOCH)"
 echo "incoming signer    : $NEW_SIGNER  (keyEpoch $NEW_KEY_EPOCH)"
 echo ""
@@ -106,7 +146,7 @@ echo "-> proposed; currentSigner still $OUTGOING_SIGNER, activates at $ACTIVATE_
 # =======================================================================================
 echo ""
 echo "── early activation must fail ─────────────────────────────────────────"
-EARLY="$(cast call "$PROXY" 'activateRotation()' --rpc-url "$RPC" 2>&1 || true)"
+EARLY="$(cast call "$PROXY" 'activateRotation(bytes)' 0x --rpc-url "$RPC" 2>&1 || true)"
 case "$EARLY" in
   *RotationNotReady*|*0f1f7e1a*)
     echo "-> RotationNotReady()  the challenge window is being enforced" ;;
@@ -152,7 +192,9 @@ fi
 # DKG'd. Catch it here with a clear message rather than letting forge report a bare revert.
 echo ""
 echo "── activate ───────────────────────────────────────────────────────────"
-PRECHECK="$(cast call "$PROXY" 'activateRotation()' --rpc-url "$RPC" 2>&1 || true)"
+# Probe with the REAL incoming signature so a genuine IncomingNotReady (bad liveness proof)
+# would surface here too, not just veto/not-ready.
+PRECHECK="$(cast call "$PROXY" 'activateRotation(bytes)' "$ARS" --rpc-url "$RPC" 2>&1 || true)"
 case "$PRECHECK" in
   *RotationIsVetoed*|*475abcc2*)
     echo "!! RotationIsVetoed() — this rotation was vetoed during the challenge window." >&2
@@ -163,9 +205,13 @@ case "$PRECHECK" in
   *RotationNotReady*|*0f1f7e1a*)
     echo "!! still RotationNotReady after the warp — chain time did not advance enough" >&2
     exit 1 ;;
+  *IncomingNotReady*)
+    echo "!! IncomingNotReady() — the incoming committee's activation signature does not" >&2
+    echo "   recover to pendingSigner. Re-sign the ACTIVATE_PREIMAGE with shares-next." >&2
+    exit 1 ;;
 esac
 
-PROXY="$PROXY" \
+PROXY="$PROXY" ACTIVATE_RS="$ARS" \
   forge script script/DevnetRotate.s.sol:DevnetRotate --sig 'activate()' \
     --rpc-url "$RPC" --private-key "$DEPLOYER_KEY" --broadcast -vv
 

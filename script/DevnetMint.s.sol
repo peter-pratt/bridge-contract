@@ -44,7 +44,7 @@ contract DevnetMint is Script {
 
         // Recompute the digest the way mint() does, from live chain state.
         bytes32 digest =
-            keccak256(abi.encode(w.MINT_TAG(), block.chainid, proxy, to, amount, beldexTxid));
+            keccak256(abi.encode(w.MINT_TAG(), block.chainid, proxy, to, amount, beldexTxid, uint32(0)));
         console2.log("digest       :", vm.toString(digest));
         console2.log("currentSigner:", signer);
 
@@ -65,7 +65,7 @@ contract DevnetMint is Script {
         uint256 balBefore = w.balanceOf(to);
 
         vm.startBroadcast();
-        w.mint(to, amount, beldexTxid, sig);
+        w.mint(to, amount, beldexTxid, 0, sig);
         vm.stopBroadcast();
 
         console2.log("balance before:", balBefore);

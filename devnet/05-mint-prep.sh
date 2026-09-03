@@ -160,8 +160,8 @@ fi
 
 # --- the preimage ------------------------------------------------------------------------
 # Byte-for-byte what WrappedBDX.mint() keccaks:
-#   abi.encode(MINT_TAG, block.chainid, address(this), to, amount, beldexTxid)
-# Six static words = 192 bytes. Built from the tag read off THIS proxy, not from mint.env,
+#   abi.encode(MINT_TAG, block.chainid, address(this), to, amount, beldexTxid, outputIndex)
+# Seven static words = 224 bytes. Built from the tag read off THIS proxy, not from mint.env,
 # so a redeployment between then and now cannot go unnoticed.
 say "mint preimage"
 if [ "$(lc "$MINT_TAG_ONCHAIN")" != "$(lc "$MINT_TAG")" ]; then
@@ -169,13 +169,14 @@ if [ "$(lc "$MINT_TAG_ONCHAIN")" != "$(lc "$MINT_TAG")" ]; then
   echo "   That means \$PROXY is not the contract mint.env was written for." >&2
   exit 1
 fi
+OUT_INDEX="${OUT_INDEX:-0}"
 PREIMAGE2="$(cast abi-encode \
-  'f(bytes32,uint256,address,address,uint256,bytes32)' \
-  "$MINT_TAG_ONCHAIN" "$CHAIN_ID" "$PROXY" "$TO" "$AMOUNT" "$TXID")"
+  'f(bytes32,uint256,address,address,uint256,bytes32,uint32)' \
+  "$MINT_TAG_ONCHAIN" "$CHAIN_ID" "$PROXY" "$TO" "$AMOUNT" "$TXID" "$OUT_INDEX")"
 DIGEST2="$(cast keccak "$PREIMAGE2")"
 HEXLEN="$(printf '%s' "${PREIMAGE2#0x}" | wc -c | tr -d ' ')"
-if [ "$HEXLEN" -ne 384 ]; then
-  echo "!! expected 384 hex chars (192 bytes / 6 ABI words) — got $HEXLEN." >&2
+if [ "$HEXLEN" -ne 448 ]; then
+  echo "!! expected 448 hex chars (224 bytes / 7 ABI words) — got $HEXLEN." >&2
   exit 1
 fi
 

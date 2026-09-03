@@ -24,7 +24,7 @@ if [ -z "$SIGNER_ADDR" ]; then
   echo "!! set SIGNER_ADDR (or INITIAL_SIGNER) to the committee's Pevm address, e.g.:" >&2
   echo "     SIGNER_ADDR=0x<pevm addr> ./devnet/01-deploy.sh" >&2
   echo "   Get it from the current shares:" >&2
-  echo "     cd ~/Niyas/projects/beldex/utils/local-devnet" >&2
+  echo "     cd ~/Desktop/beldex/beldex/dkg-tss/beldex/utils/local-devnet" >&2
   echo "     runlog ./sign-pevm.sh raw 0x\$(printf 'ab%.0s' {1..32})   # read 'wBDX signer : 0x…'" >&2
   exit 1
 fi
@@ -114,11 +114,14 @@ fi
 
 # ── 5. the real mint preimage ────────────────────────────────────────────────
 # Byte-for-byte what WrappedBDX.mint() keccaks:
-#   abi.encode(MINT_TAG, block.chainid, address(this), to, amount, beldexTxid)
+#   abi.encode(MINT_TAG, block.chainid, address(this), to, amount, beldexTxid, outputIndex)
+# Seven static words. OUT_INDEX is which gateway output of the Beldex tx this mint
+# discharges (H-2): a tx may pay the gateway up to 15 times, each its own deposit.
+OUT_INDEX="${OUT_INDEX:-0}"
 say "mint preimage"
 PREIMAGE="$(cast abi-encode \
-  'f(bytes32,uint256,address,address,uint256,bytes32)' \
-  "$MINT_TAG" "$CHAIN_ID" "$PROXY" "$TO" "$AMOUNT" "$BELDEX_TXID")"
+  'f(bytes32,uint256,address,address,uint256,bytes32,uint32)' \
+  "$MINT_TAG" "$CHAIN_ID" "$PROXY" "$TO" "$AMOUNT" "$BELDEX_TXID" "$OUT_INDEX")"
 DIGEST="$(cast keccak "$PREIMAGE")"
 printf 'to          : %s\n' "$TO"
 printf 'amount      : %s atomic units (%s wBDX @ 9 decimals)\n' "$AMOUNT" "$(awk -v a="$AMOUNT" 'BEGIN{printf "%.9f", a/1000000000}')"
@@ -149,7 +152,7 @@ cat <<EOF
 
 ────────────────────────────────────────────────────────────────────────────
 NEXT — threshold-sign this preimage on the devnet committee.
-From ~/Niyas/projects/beldex/utils/local-devnet run:
+From ~/Desktop/beldex/beldex/dkg-tss/beldex/utils/local-devnet run:
 
   runlog ./sign-mint.sh $PREIMAGE
 

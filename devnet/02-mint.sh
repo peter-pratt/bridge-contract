@@ -15,7 +15,7 @@ cd "$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck disable=SC1091
 . devnet/mint.env
 
-TESTDATA="${TESTDATA:-$HOME/Niyas/projects/beldex/utils/local-devnet/testdata}"
+TESTDATA="${TESTDATA:-$HOME/Desktop/beldex/beldex/dkg-tss/beldex/utils/local-devnet/testdata}"
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 lc()  { printf '%s' "$1" | tr 'A-Z' 'a-z'; }
 
@@ -67,8 +67,8 @@ cast logs --from-block 0 --address "$PROXY" \
 
 # ── 4. replay guard ──────────────────────────────────────────────────────────
 say "replay: resubmitting the same beldexTxid must revert"
-REPLAY_OUT="$(cast call "$PROXY" 'mint(address,uint256,bytes32,bytes)' \
-  "$TO" "$AMOUNT" "$BELDEX_TXID" "${SIG_RS}1c" --rpc-url "$RPC" 2>&1)" && REPLAY_RC=0 || REPLAY_RC=1
+REPLAY_OUT="$(cast call "$PROXY" 'mint(address,uint256,bytes32,uint32,bytes)' \
+  "$TO" "$AMOUNT" "$BELDEX_TXID" "${OUT_INDEX:-0}" "${SIG_RS}1c" --rpc-url "$RPC" 2>&1)" && REPLAY_RC=0 || REPLAY_RC=1
 if [ "$REPLAY_RC" -eq 0 ]; then
   echo "!! replay did NOT revert"; exit 1
 fi

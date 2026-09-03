@@ -43,7 +43,7 @@
 #
 # Env:
 #   RELAY_ENV    prepared env to read            (default devnet/relay.env)
-#   RELAYER_DIR  the relayer crate               (default ~/Niyas/projects/beldex/bridge/relayer)
+#   RELAYER_DIR  the relayer crate               (default ~/Desktop/beldex/beldex/dkg-tss/beldex/bridge/relayer)
 #   TESTDATA     where the signer logs live
 #   RELAYER_KEY  the gas-paying EOA              (default anvil account #9)
 #   SKIP_CARGO_TEST=1  skip the crate's own unit tests (they are the weakest check here)
@@ -60,8 +60,8 @@ RELAY_ENV="${RELAY_ENV:-devnet/relay.env}"
 # shellcheck disable=SC1091
 . "$RELAY_ENV"
 
-RELAYER_DIR="${RELAYER_DIR:-$HOME/Niyas/projects/beldex/bridge/relayer}"
-TESTDATA="${TESTDATA:-$HOME/Niyas/projects/beldex/utils/local-devnet/testdata}"
+RELAYER_DIR="${RELAYER_DIR:-$HOME/Desktop/beldex/beldex/dkg-tss/beldex/bridge/relayer}"
+TESTDATA="${TESTDATA:-$HOME/Desktop/beldex/beldex/dkg-tss/beldex/utils/local-devnet/testdata}"
 # anvil account #9 — deliberately NOT #0 (the deployer/recipient) and not on any signer list.
 RELAYER_KEY="${RELAYER_KEY:-0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6}"
 
@@ -219,8 +219,8 @@ echo "  payload  $WORK/payload.json"
 # ============================================================================= §5 calldata
 say "5 — calldata differential: relayer vs cast"
 
-CAST_DATA="$(lc "$(cast calldata 'mint(address,uint256,bytes32,bytes)' \
-                    "$TO" "$AMOUNT" "$BELDEX_TXID" "$SIG65")")"
+CAST_DATA="$(lc "$(cast calldata 'mint(address,uint256,bytes32,uint32,bytes)' \
+                    "$TO" "$AMOUNT" "$BELDEX_TXID" "${OUT_INDEX:-0}" "$SIG65")")"
 if [ "$DATA" != "$CAST_DATA" ]; then
   printf '%s\n' "$DATA"      | fold -w 64 | head -8 >&2
   echo "   --- vs ---" >&2
@@ -230,7 +230,7 @@ if [ "$DATA" != "$CAST_DATA" ]; then
    and the right-padding of a 65-byte value to 96. Do not broadcast this."
 fi
 echo "  ${#DATA} hex chars, byte-identical to cast calldata ✓"
-echo "  selector 0x${DATA:2:8} = mint(address,uint256,bytes32,bytes) ✓"
+echo "  selector 0x${DATA:2:8} = mint(address,uint256,bytes32,uint32,bytes) ✓"
 
 # ============================================================================== §6 tampers
 say "6 — a relayer can forge nothing"

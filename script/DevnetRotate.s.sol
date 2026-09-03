@@ -141,8 +141,18 @@ contract DevnetRotate is Script {
         console2.log("pendingSigner    :", pending);
         require(pending != address(0), "no pending rotation - run propose() first");
 
+        // H.6.2b liveness proof: the INCOMING committee must sign the activation digest
+        // (proof-of-possession) before the old key is retired. ACTIVATE_RS is that raw
+        // r||s from the *new* committee, assembled to r||s||v exactly like the propose sig.
+        bytes memory ars = vm.envBytes("ACTIVATE_RS");
+        bytes32 actDigest = keccak256(
+            abi.encode(w.ACTIVATE_TAG(), block.chainid, address(w), pendingEpoch, pending)
+        );
+        console2.log("activate digest :", vm.toString(actDigest));
+        bytes memory incomingSig = _assemble(actDigest, ars, pending);
+
         vm.startBroadcast();
-        w.activateRotation();
+        w.activateRotation(incomingSig);
         vm.stopBroadcast();
 
         console2.log("");

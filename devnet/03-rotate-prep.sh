@@ -41,6 +41,7 @@ CUR_EPOCH="$(cast call "$PROXY" 'keyEpoch()(uint64)' --rpc-url "$RPC")"
 # Newer cast appends the type in brackets on some builds; keep only leading digits.
 CUR_EPOCH="$(printf '%s' "$CUR_EPOCH" | sed -n 's/^\([0-9][0-9]*\).*/\1/p')"
 ROTATE_TAG_ONCHAIN="$(cast call "$PROXY" 'ROTATE_TAG()(bytes32)' --rpc-url "$RPC")"
+ACTIVATE_TAG_ONCHAIN="$(cast call "$PROXY" 'ACTIVATE_TAG()(bytes32)' --rpc-url "$RPC")"
 TIMELOCK="$(cast call "$PROXY" 'rotateTimelock()(uint256)' --rpc-url "$RPC" | sed -n 's/^\([0-9][0-9]*\).*/\1/p')"
 
 NEW_KEY_EPOCH="${NEW_KEY_EPOCH:-$(( CUR_EPOCH + 1 ))}"
@@ -71,6 +72,18 @@ if [ "$CAST_TAG" != "skip" ] && [ "$CAST_TAG" != "$EXPECT_TAG" ]; then
   echo "         convention difference in this foundry build, not a contract problem."
 fi
 
+# Same cross-check for the activation tag (H.6.2b liveness proof). If the on-chain tag is
+# empty/zero the deployment predates the incoming-signature gate — redeploy the contract.
+EXPECT_ACTIVATE_TAG=0xdde1d75143faf59291dd472ba9226a0604d9eb613b71945f059fbc9365d56804
+if [ "$(lower "$ACTIVATE_TAG_ONCHAIN")" != "$EXPECT_ACTIVATE_TAG" ]; then
+  echo "!! ACTIVATE_TAG mismatch"
+  echo "   on-chain : $ACTIVATE_TAG_ONCHAIN"
+  echo "   expected : $EXPECT_ACTIVATE_TAG   (keccak256 of \"BELDEX_BRIDGE_ACTIVATE_V1\")"
+  echo "   If it reads 0x0…0, this proxy is an OLD build without the activation liveness"
+  echo "   gate — redeploy WrappedBDX before rotating."
+  exit 1
+fi
+
 # --- the preimage ---------------------------------------------------------------------
 # Mirrors WrappedBDX.rotateSigner:
 #   keccak256(abi.encode(ROTATE_TAG, block.chainid, address(this), newKeyEpoch, newSigner))
@@ -81,6 +94,17 @@ PREIMAGE="$(cast abi-encode \
   'f(bytes32,uint256,address,uint64,address)' \
   "$ROTATE_TAG_ONCHAIN" "$CHAIN_ID" "$PROXY" "$NEW_KEY_EPOCH" "$NEW_SIGNER")"
 DIGEST="$(cast keccak "$PREIMAGE")"
+
+# --- the ACTIVATION preimage (H.6.2b) -------------------------------------------------
+# Mirrors WrappedBDX.activateRotation's incoming-liveness digest:
+#   keccak256(abi.encode(ACTIVATE_TAG, block.chainid, address(this), pendingKeyEpoch, pendingSigner))
+# At prep time pendingKeyEpoch==NEW_KEY_EPOCH and pendingSigner==NEW_SIGNER, so the same
+# tuple shape as the rotate preimage — only the tag differs. This is the preimage the
+# INCOMING committee (shares-next) signs to prove it can already sign under the new key.
+ACTIVATE_PREIMAGE="$(cast abi-encode \
+  'f(bytes32,uint256,address,uint64,address)' \
+  "$ACTIVATE_TAG_ONCHAIN" "$CHAIN_ID" "$PROXY" "$NEW_KEY_EPOCH" "$NEW_SIGNER")"
+ACTIVATE_DIGEST="$(cast keccak "$ACTIVATE_PREIMAGE")"
 
 HEXLEN="$(printf '%s' "${PREIMAGE#0x}" | wc -c | tr -d ' ')"
 
@@ -97,6 +121,9 @@ NEW_KEY_EPOCH=$NEW_KEY_EPOCH
 ROTATE_TIMELOCK=$TIMELOCK
 ROTATE_PREIMAGE=$PREIMAGE
 ROTATE_DIGEST=$DIGEST
+ACTIVATE_TAG=$ACTIVATE_TAG_ONCHAIN
+ACTIVATE_PREIMAGE=$ACTIVATE_PREIMAGE
+ACTIVATE_DIGEST=$ACTIVATE_DIGEST
 EOF
 
 cat <<EOF
@@ -113,10 +140,18 @@ cat <<EOF
 
   written to devnet/rotate.env
 
-  Next — have the OUTGOING committee sign this preimage:
+  Next — TWO signatures are needed (H.6.2b):
 
-    cd <beldex>/utils/local-devnet
-    runlog ./sign-rotate.sh $PREIMAGE
+  1. the OUTGOING committee authorises the hand-off (rotateSigner):
+
+       cd <beldex>/utils/local-devnet
+       runlog ./sign-rotate.sh $PREIMAGE
+
+  2. the INCOMING committee proves liveness (activateRotation) — signed with the
+     FRESH DKG shares (shares-next), logged to a distinct file so 04 can tell them
+     apart:
+
+       SHARE_SUBDIR=shares-next ACTIVATE=1 runlog ./sign-rotate.sh $ACTIVATE_PREIMAGE
 
   then come back and run:
 

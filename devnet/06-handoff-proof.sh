@@ -36,7 +36,7 @@ cd "$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck disable=SC1091
 . devnet/mint2.env
 
-TESTDATA="${TESTDATA:-$HOME/Niyas/projects/beldex/utils/local-devnet/testdata}"
+TESTDATA="${TESTDATA:-$HOME/Desktop/beldex/beldex/dkg-tss/beldex/utils/local-devnet/testdata}"
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 lc()   { printf '%s' "$1" | tr 'A-Z' 'a-z'; }
 num()  { printf '%s' "$1" | sed -n 's/^\([0-9][0-9]*\).*/\1/p'; }
@@ -157,8 +157,8 @@ printf 'balanceOf(%s) = %s\ntotalSupply = %s\ncurrentSigner = %s (keyEpoch %s)\n
 # failed for every v it could have been.
 say "leg A — retired committee ($RETIRED_SIGNER) attempts the mint"
 for V in 1b 1c; do
-  OUT="$(cast call "$PROXY" 'mint(address,uint256,bytes32,bytes)' \
-          "$TO" "$AMOUNT" "$BELDEX_TXID" "0x${RS_OLD}${V}" --rpc-url "$RPC" 2>&1)" && RC=0 || RC=1
+  OUT="$(cast call "$PROXY" 'mint(address,uint256,bytes32,uint32,bytes)' \
+          "$TO" "$AMOUNT" "$BELDEX_TXID" "${OUT_INDEX:-0}" "0x${RS_OLD}${V}" --rpc-url "$RPC" 2>&1)" && RC=0 || RC=1
   if [ "$RC" -eq 0 ]; then
     fail "the retired committee's signature was ACCEPTED with v=0x$V.
    The rotation did not actually retire it. Do not ship this."
@@ -234,8 +234,8 @@ say "leg C — the promoted committee's own signature, replayed"
 # coin flip: half the time it reports BadSigner and the replay guard is never exercised.
 REPLAY_OK=0
 for V in 1b 1c; do
-  OUT="$(cast call "$PROXY" 'mint(address,uint256,bytes32,bytes)' \
-          "$TO" "$AMOUNT" "$BELDEX_TXID" "0x${RS_NEW}${V}" --rpc-url "$RPC" 2>&1)" && RC=0 || RC=1
+  OUT="$(cast call "$PROXY" 'mint(address,uint256,bytes32,uint32,bytes)' \
+          "$TO" "$AMOUNT" "$BELDEX_TXID" "${OUT_INDEX:-0}" "0x${RS_NEW}${V}" --rpc-url "$RPC" 2>&1)" && RC=0 || RC=1
   if [ "$RC" -eq 0 ]; then
     fail "the replay did NOT revert with v=0x$V -- the same beldexTxid minted twice."
   fi
