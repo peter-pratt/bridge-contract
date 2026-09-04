@@ -18,8 +18,10 @@ import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 ///
 /// ## Byte-exact agreement with the off-chain signer (load-bearing)
 /// The mint digest is `keccak256(abi.encode(MINT_TAG, block.chainid, address(this), to,
-/// amount, beldexTxid))`. Every field, order, and the tag value match the Rust signer's
-/// `watch.rs::MintEvent::mint_preimage` exactly — otherwise `ecrecover` fails.
+/// amount, beldexTxid, outputIndex))` — seven ABI words. Every field, order, and the tag
+/// value match the Rust signer's `watch.rs::MintEvent::mint_preimage` exactly — otherwise
+/// `ecrecover` fails. `outputIndex` is part of the signed bytes, not just the replay key:
+/// without it one signature would authorize any output of the same transaction.
 ///
 /// **`MINT_TAG = keccak256("BELDEX_BRIDGE_MINT_V1")`** — the signer hardcodes the same
 /// precomputed hash (`watch.rs::MINT_TAG`) and guards it with a keccak drift test. The
