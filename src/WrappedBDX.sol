@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import { ERC20Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
-import { PausableUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {
+    ERC20Upgradeable
+} from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
+import {
+    PausableUpgradeable
+} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import {
+    UUPSUpgradeable
+} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
@@ -18,10 +24,10 @@ import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 ///
 /// ## Byte-exact agreement with the off-chain signer (load-bearing)
 /// The mint digest is `keccak256(abi.encode(MINT_TAG, block.chainid, address(this), to,
-/// amount, beldexTxid, outputIndex))` — seven ABI words. Every field, order, and the tag
-/// value match the Rust signer's `watch.rs::MintEvent::mint_preimage` exactly — otherwise
-/// `ecrecover` fails. `outputIndex` is part of the signed bytes, not just the replay key:
-/// without it one signature would authorize any output of the same transaction.
+/// amount, beldexTxid, outputIndex))`. Every field, order, and the tag value match the
+/// Rust signer's `watch.rs::MintEvent::mint_preimage` exactly — otherwise `ecrecover`
+/// fails. `outputIndex` is in the signed bytes and not only the replay key: without it
+/// one signature would authorize any output of the same transaction.
 ///
 /// **`MINT_TAG = keccak256("BELDEX_BRIDGE_MINT_V1")`** — the signer hardcodes the same
 /// precomputed hash (`watch.rs::MINT_TAG`) and guards it with a keccak drift test. The
@@ -56,7 +62,9 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
     address public currentSigner;
     /// @notice Monotonic key generation; a rotation may only move it forward (anti-rollback).
     uint64 public keyEpoch;
-    /// @notice Admin-managed break-glass signer set (Phase K recovery only, never normal churn).
+    /// @notice Admin-managed break-glass signer set (Phase K recovery only, never normal
+    ///         churn). Informational: `signerEpoch` is what `mint` actually checks, since
+    ///         membership alone is not enough once recovery keys expire by epoch.
     mapping(address => bool) public isSigner;
 
     // --- Rotation challenge window (H.6) ---------------------------------------------
@@ -84,25 +92,36 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
 
     // --- Admin (a TimelockController + multisig in production) ------------------------
     address public admin;
+    /// @notice Rotation authorizations consumed so far. A proposal must carry
+    ///         `rotationNonce + 1`, and the nonce is spent once the signature verifies,
+    ///         so an authorization is single-use. Packs into `admin`'s spare bytes.
+    uint64 public rotationNonce;
 
     /// @notice Rotation proposals governance has rejected, keyed by
-    ///         `keccak256(abi.encode(newSigner, newKeyEpoch))`.
-    ///
-    ///         WHY A MAP AND NOT A FLAG. `rotationVetoed` alone was not binding: the
-    ///         rotate digest carries no nonce, so the outgoing committee's signature
-    ///         stays valid indefinitely, and `rotateSigner` is a permissionless relay
-    ///         that cleared the flag on every fresh proposal. Anyone who saw the
-    ///         original transaction could therefore resubmit it and wash out a veto
-    ///         governance had deliberately raised. Recording the rejected *proposal*
-    ///         makes the veto survive replay: the same `(signer, epoch)` can never be
-    ///         staged again, whoever relays it and however long they wait.
-    ///
-    ///         The legitimate path after a veto is a different signer or a higher
-    ///         epoch. `clearVetoedProposal` exists for a veto raised in error.
+    ///         `keccak256(abi.encode(newSigner, newKeyEpoch))`. The nonce makes a
+    ///         *replay* impossible; this makes a *re-signing* of the same rejected
+    ///         identity impossible too, until an admin clears it.
     mapping(bytes32 => bool) public vetoedProposals;
 
+    /// @notice Nominated admin, pending its own acceptance. A transfer only completes
+    ///         when this address calls `acceptAdmin`, so a mistyped destination cannot
+    ///         strand governance.
+    address public pendingAdmin;
+
+    /// @notice Key epoch each break-glass signer was authorized for. A signer is only
+    ///         accepted while this equals the live `keyEpoch`, so recovery keys lapse
+    ///         automatically at the next rotation instead of lasting forever.
+    mapping(address => uint64) public signerEpoch;
+
+    /// @notice Smallest redeemable amount. Enforced here rather than in the off-chain
+    ///         release policy because the burn is irreversible: declining a dust release
+    ///         after the fact would destroy the tokens and pay nothing. 0 disables it.
+    uint256 public minRedeemAmount;
+
     // --- Events ----------------------------------------------------------------------
-    event Minted(address indexed to, uint256 amount, bytes32 indexed beldexTxid, uint32 outputIndex);
+    event Minted(
+        address indexed to, uint256 amount, bytes32 indexed beldexTxid, uint32 outputIndex
+    );
     event RedeemToNative(address indexed from, uint256 amount, bytes beldexAddress);
     event RotationProposed(address indexed newSigner, uint64 newKeyEpoch, uint256 activateAt);
     event Rotated(address indexed newSigner, uint64 newKeyEpoch);
@@ -112,7 +131,9 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
     event SignerAdded(address indexed signer);
     event SignerRemoved(address indexed signer);
     event CapsSet(uint256 windowMintCap, uint256 perTxMax);
+    event MinRedeemAmountSet(uint256 minRedeemAmount);
     event BondBackingCapLimitSet(uint256 bondBackingCapLimit);
+    event AdminTransferStarted(address indexed currentAdmin, address indexed pendingAdmin);
     event AdminTransferred(address indexed previousAdmin, address indexed newAdmin);
     event Paused_(address indexed by);
     event Unpaused_(address indexed by);
@@ -127,6 +148,11 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
     error NoPendingRotation();
     error RotationNotReady();
     error RotationIsVetoed();
+    error BadRotationNonce();
+    error RotationAuthorizationExpired();
+    error NotPendingAdmin();
+    error InvalidCaps();
+    error BelowMinRedeem();
     error IncomingNotReady();
     error CapAboveBondBacking();
     error BadRedeemAddress();
@@ -158,9 +184,12 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
         uint256 epochSeconds_,
         uint256 rotateTimelock_
     ) external initializer {
-        if (admin_ == address(0) || initialSigner == address(0)) revert ZeroAddress();
+        if (admin_ == address(0) || initialSigner == address(0)) {
+            revert ZeroAddress();
+        }
         require(epochSeconds_ > 0, "epochSeconds=0");
         require(windowMintCap_ <= bondBackingCapLimit_, "cap>bond");
+        require(perTxMax_ <= windowMintCap_, "perTx>window");
 
         __ERC20_init("Wrapped BDX", "wBDX");
         __Pausable_init();
@@ -193,21 +222,12 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
     /// @notice Mint `amount` wBDX to `to` against a Beldex deposit, authorized by a
     ///         committee `Pevm` signature over the domain-separated digest.
     ///
-    ///         DEPOSIT IDENTITY (H-2). A Beldex transaction may pay the gateway more than
-    ///         once — consensus permits `GATEWAY_TX_MAX_OUTPUTS` (15) gateway outputs per
-    ///         tx and documents batch deposits as legitimate — and each output carries its
-    ///         own memo, hence its own destination. Keying the replay guard on the bare
-    ///         `beldexTxid` therefore allowed exactly ONE of them to be minted and stranded
-    ///         the rest permanently. The unit of value is the OUTPUT, so the guard is keyed
-    ///         on `(beldexTxid, outputIndex)` and `outputIndex` is bound into the digest.
-    ///
-    ///         `outputIndex` is deliberately NOT range-checked against 15: that is an L1
-    ///         consensus constant which can move in a hard fork, and this contract cannot be
-    ///         upgraded in lockstep across every chain. The committee signature is the
-    ///         authority, and bounding the index would prevent nothing a compromised signer
-    ///         could not already do.
-    /// @param outputIndex Index of the gateway output within `beldexTxid` (0 for a single-
-    ///        output deposit).
+    ///         A Beldex tx may pay the gateway up to `GATEWAY_TX_MAX_OUTPUTS` times, each
+    ///         output its own deposit, so the unit of value is the OUTPUT. `outputIndex`
+    ///         is deliberately not range-checked against that constant: it can move in a
+    ///         hard fork, and bounding it would prevent nothing a compromised signer could
+    ///         not already do.
+    /// @param outputIndex Gateway output within `beldexTxid` (0 for a single-output deposit).
     /// @param sig 65-byte secp256k1 signature (r‖s‖v) from the committee key.
     function mint(
         address to,
@@ -215,15 +235,13 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
         bytes32 beldexTxid,
         uint32 outputIndex,
         bytes calldata sig
-    )
-        external
-        whenNotPaused
-    {
+    ) external whenNotPaused {
+        if (amount == 0) revert ZeroAmount();
         bytes32 digest = keccak256(
             abi.encode(MINT_TAG, block.chainid, address(this), to, amount, beldexTxid, outputIndex)
         );
         address recovered = ECDSA.recover(digest, sig);
-        if (recovered != currentSigner && !isSigner[recovered]) revert BadSigner();
+        if (recovered != currentSigner && signerEpoch[recovered] != keyEpoch) revert BadSigner();
 
         // LEGACY KEY (upgrade safety). Deposits minted before this upgrade were recorded
         // under the raw txid. Checking only the new composite key would leave every one of
@@ -260,6 +278,9 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
     ///         is off-chain). Emits the exact event the E.2 watcher decodes.
     function redeemToNative(uint256 amount, string calldata beldexAddress) external whenNotPaused {
         if (amount == 0) revert ZeroAmount();
+        // Checked before `_burn`: a release refused later would leave the user with
+        // neither the wBDX nor the BDX.
+        if (amount < minRedeemAmount) revert BelowMinRedeem();
         if (amount > perTxMax) revert PerTxCap();
         bytes memory addr = bytes(beldexAddress);
         // Shape-only: reject empty and absurdly long. Burn is irreversible, so err on the
@@ -276,20 +297,35 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
     /// @notice Propose a new committee signer, authorized by the **outgoing** signer.
     ///         Permissionless relay: anyone may submit the outgoing committee's signature.
     ///         Enters a challenge window rather than switching immediately (H.6.2).
-    function rotateSigner(address newSigner, uint64 newKeyEpoch, bytes calldata outgoingSig)
-        external
-        whenNotPaused
-    {
+    /// @param nonce    Must equal `rotationNonce + 1`. Spent once the signature verifies,
+    ///                  making every authorization single-use.
+    /// @param deadline  Last timestamp at which this authorization may be relayed.
+    function rotateSigner(
+        address newSigner,
+        uint64 newKeyEpoch,
+        uint64 nonce,
+        uint256 deadline,
+        bytes calldata outgoingSig
+    ) external whenNotPaused {
         if (newKeyEpoch <= keyEpoch) revert StaleEpoch();
         if (newSigner == address(0)) revert ZeroAddress();
-        // A proposal governance already rejected can never be staged again, even by a
-        // valid (replayed) outgoing signature (H-3).
+        // forge-lint: disable-next-line(block-timestamp)
+        if (block.timestamp > deadline) revert RotationAuthorizationExpired();
+        // Single-use: a relayed proposal cannot be replayed, so it can neither revive a
+        // vetoed hand-off nor restart the challenge window to stall a live one.
+        if (nonce != rotationNonce + 1) revert BadRotationNonce();
+        // A proposal governance rejected can never be staged again, even if the committee
+        // re-signs that same identity under a fresh nonce.
         if (vetoedProposals[_proposalId(newSigner, newKeyEpoch)]) revert RotationIsVetoed();
 
-        bytes32 digest =
-            keccak256(abi.encode(ROTATE_TAG, block.chainid, address(this), newKeyEpoch, newSigner));
+        bytes32 digest = keccak256(
+            abi.encode(
+                ROTATE_TAG, block.chainid, address(this), newKeyEpoch, newSigner, nonce, deadline
+            )
+        );
         if (ECDSA.recover(digest, outgoingSig) != currentSigner) revert BadSigner();
 
+        rotationNonce = nonce;
         pendingSigner = newSigner;
         pendingKeyEpoch = newKeyEpoch;
         pendingActivateAt = block.timestamp + rotateTimelock;
@@ -306,34 +342,22 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
     }
 
     /// @notice Activate a proposed rotation after its challenge window, if not vetoed.
-    ///         Permissionless *relay*: anyone may submit the transaction, but the cutover
-    ///         only happens if `incomingSig` proves the **incoming** committee can already
-    ///         sign under the new key (H.6.2b liveness proof).
+    ///         Permissionless. Clean cutover: old-key mints are valid until this runs,
+    ///         and rejected after.
     ///
-    ///         WHY the incoming signature is required. The cutover is atomic — old-key mints
-    ///         are valid right up to this call and rejected after. If we flipped to a key the
-    ///         new committee cannot yet produce (DKG not finished / mesh not live), we would
-    ///         open a "no active quorum" window: the old key is retired but the new key can't
-    ///         sign, so no deposit can be minted until the new committee comes up. Gating on a
-    ///         proof-of-possession from `pendingSigner` makes that window impossible — the flip
-    ///         cannot occur until the successor has demonstrably taken office. If the successor
-    ///         never proves liveness, activation simply stalls and `breakGlassSetSigner`
-    ///         (admin) is the deliberate fallback.
-    ///
-    ///         The gate is on WHO SIGNED (`pendingSigner`), not on `msg.sender`: the successor
-    ///         is a threshold key held by the committee mesh, not necessarily an EOA that can
-    ///         send a transaction — so the signature is produced by the committee and relayed
-    ///         by anyone.
-    /// @param incomingSig 65-byte secp256k1 signature (r‖s‖v) by the *pending* key over the
-    ///        domain-separated activation digest.
-    ///
-    ///         `whenNotPaused` (M-4): pause is the emergency stop, and a cutover moves
-    ///         the mint AUTHORITY, not just mint activity. Without this an operator who
-    ///         paused on suspicion of compromise had not actually stopped the hand-off.
-    ///         Admin repair while paused is unaffected — `breakGlassSetSigner` is
-    ///         deliberately not gated.
+    ///         `incomingSig` proves the successor can already sign under the new key
+    ///         (H.6.2b). Without it the cutover could retire the old key while the new one
+    ///         cannot yet sign, leaving no usable mint authority; if the successor never
+    ///         proves liveness, activation stalls and `breakGlassSetSigner` is the
+    ///         fallback. The gate is on WHO SIGNED, not `msg.sender`: the successor is a
+    ///         threshold key held across the mesh, not an account that can send a tx.
+    /// @param incomingSig 65-byte secp256k1 signature (r‖s‖v) by the pending key.
     function activateRotation(bytes calldata incomingSig) external whenNotPaused {
-        if (pendingActivateAt == 0 || block.timestamp < pendingActivateAt) revert RotationNotReady();
+        if (pendingActivateAt == 0 || block.timestamp < pendingActivateAt) {
+            revert RotationNotReady();
+        }
+        // Unreachable in the current design - `vetoRotation` clears `pendingActivateAt`,
+        // so the check above fires first. Kept as a cheap invariant guard.
         if (rotationVetoed) revert RotationIsVetoed();
 
         bytes32 digest = keccak256(
@@ -354,9 +378,9 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
     ///         the Beldex watchers detecting that `pendingSigner` != the DKG address the
     ///         consensus-selected committee actually generated (H.6.2c). Modeled here as
     ///         an admin (freeze-authority) action.
-    ///         A veto is **decisive**: it records the rejected proposal permanently and
-    ///         cancels the pending rotation outright, rather than only raising a flag a
-    ///         later proposal could clear (H-3).
+    ///
+    ///         Decisive: records the rejected proposal permanently and cancels the pending
+    ///         rotation outright, rather than raising a flag a later proposal could clear.
     function vetoRotation() external onlyAdmin {
         if (pendingActivateAt == 0) revert NoPendingRotation();
 
@@ -421,11 +445,14 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
     function addSigner(address signer) external onlyAdmin {
         if (signer == address(0)) revert ZeroAddress();
         isSigner[signer] = true;
+        // Authorized for the CURRENT epoch only; the next rotation lapses it.
+        signerEpoch[signer] = keyEpoch;
         emit SignerAdded(signer);
     }
 
     function removeSigner(address signer) external onlyAdmin {
         isSigner[signer] = false;
+        delete signerEpoch[signer];
         emit SignerRemoved(signer);
     }
 
@@ -441,22 +468,43 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
     ///         bond backing — so a cap raise not preceded by a bond raise reverts.
     function setCaps(uint256 newWindowMintCap, uint256 newPerTxMax) external onlyAdmin {
         if (newWindowMintCap > bondBackingCapLimit) revert CapAboveBondBacking();
+        // A per-tx allowance above the window budget is unreachable and hides the real
+        // limit from anyone reading the caps.
+        if (newPerTxMax > newWindowMintCap) revert InvalidCaps();
         windowMintCap = newWindowMintCap;
         perTxMax = newPerTxMax;
         emit CapsSet(newWindowMintCap, newPerTxMax);
     }
 
+    /// @notice Nominate a new admin. The transfer only completes when `newAdmin` calls
+    ///         `acceptAdmin`, so a mistyped or uncontrolled destination cannot strand
+    ///         governance (pause, veto, break-glass and upgrade authority).
+    /// @notice Set the redemption floor. 0 disables it.
+    function setMinRedeemAmount(uint256 newMin) external onlyAdmin {
+        minRedeemAmount = newMin;
+        emit MinRedeemAmountSet(newMin);
+    }
+
     function transferAdmin(address newAdmin) external onlyAdmin {
         if (newAdmin == address(0)) revert ZeroAddress();
-        emit AdminTransferred(admin, newAdmin);
-        admin = newAdmin;
+        pendingAdmin = newAdmin;
+        emit AdminTransferStarted(admin, newAdmin);
+    }
+
+    /// @notice Complete a transfer nominated by the current admin.
+    function acceptAdmin() external {
+        if (msg.sender != pendingAdmin) revert NotPendingAdmin();
+        emit AdminTransferred(admin, pendingAdmin);
+        admin = pendingAdmin;
+        delete pendingAdmin;
     }
 
     /// @dev UUPS upgrade authority: admin (a TimelockController) only.
     function _authorizeUpgrade(address) internal override onlyAdmin { }
 
     /// @dev Storage gap for future upgrades (this contract's own vars only; OZ v5 bases
-    ///      use ERC-7201 namespaced storage and need no gap). Reduced 40 -> 39 when
-    ///      `vetoedProposals` was appended, so every pre-existing slot keeps its index.
-    uint256[39] private __gap;
+    ///      use ERC-7201 namespaced storage and need no gap). Reduced 40 -> 36: every new
+    ///      variable was appended and `rotationNonce` packed into `admin`'s spare bytes,
+    ///      so every pre-existing slot keeps its index.
+    uint256[36] private __gap;
 }

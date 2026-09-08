@@ -23,10 +23,10 @@ contract WrappedBDXActivateTest is Test {
     address internal alice = address(0xB0B);
     address internal relayer = address(0xF00D);
 
-    uint256 internal committeePk = 0xC0FFEE;      // outgoing committee key
+    uint256 internal committeePk = 0xC0FFEE; // outgoing committee key
     address internal committee;
 
-    uint256 internal newPk = 0x5165A;             // incoming committee key
+    uint256 internal newPk = 0x5165A; // incoming committee key
     address internal newSigner;
 
     uint256 internal constant COIN = 1e9;
@@ -55,7 +55,17 @@ contract WrappedBDXActivateTest is Test {
     }
 
     function _rotateDigest(uint64 e, address s) internal view returns (bytes32) {
-        return keccak256(abi.encode(w.ROTATE_TAG(), block.chainid, address(w), e, s));
+        return keccak256(
+            abi.encode(
+                w.ROTATE_TAG(),
+                block.chainid,
+                address(w),
+                e,
+                s,
+                w.rotationNonce() + 1,
+                type(uint256).max
+            )
+        );
     }
 
     function _activateDigest(uint64 e, address s) internal view returns (bytes32) {
@@ -63,14 +73,17 @@ contract WrappedBDXActivateTest is Test {
     }
 
     function _mintDigest(address to, uint256 amount, bytes32 txid) internal view returns (bytes32) {
-        return keccak256(abi.encode(w.MINT_TAG(), block.chainid, address(w), to, amount, txid, uint32(0)));
+        return keccak256(
+            abi.encode(w.MINT_TAG(), block.chainid, address(w), to, amount, txid, uint32(0))
+        );
     }
 
     // Stage a valid rotation to `newSigner` at epoch 2 and warp past the challenge window.
     function _proposeAndReachWindow() internal {
         bytes memory rot = _sign(committeePk, _rotateDigest(2, newSigner));
+        uint64 _n = w.rotationNonce() + 1;
         vm.prank(relayer);
-        w.rotateSigner(newSigner, 2, rot);
+        w.rotateSigner(newSigner, 2, _n, type(uint256).max, rot);
         vm.warp(w.pendingActivateAt());
     }
 
@@ -85,7 +98,7 @@ contract WrappedBDXActivateTest is Test {
         vm.expectRevert(); // ECDSA rejects a zero-length signature
         w.activateRotation("");
         assertEq(w.currentSigner(), committee); // no cutover
-        assertEq(w.pendingSigner(), newSigner);  // proposal still pending
+        assertEq(w.pendingSigner(), newSigner); // proposal still pending
     }
 
     /// A well-formed signature by the WRONG key (the outgoing committee, not the incoming

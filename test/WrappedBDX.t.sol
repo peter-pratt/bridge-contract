@@ -4,7 +4,9 @@ pragma solidity 0.8.24;
 import { Test } from "forge-std/Test.sol";
 import { WrappedBDX } from "../src/WrappedBDX.sol";
 import { ERC1967Proxy } from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
-import { UUPSUpgradeable } from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {
+    UUPSUpgradeable
+} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 /// A trivial V2 to prove UUPS upgrades are admin-gated (adds one function).
 contract WrappedBDXV2 is WrappedBDX {
@@ -84,11 +86,23 @@ contract WrappedBDXTest is Test {
 
     function _rotateDigest(uint64 newEpoch, address newSigner) internal view returns (bytes32) {
         return keccak256(
-            abi.encode(w.ROTATE_TAG(), block.chainid, address(w), newEpoch, newSigner)
+            abi.encode(
+                w.ROTATE_TAG(),
+                block.chainid,
+                address(w),
+                newEpoch,
+                newSigner,
+                w.rotationNonce() + 1,
+                type(uint256).max
+            )
         );
     }
 
-    function _activateDigest(uint64 pendingEpoch, address pendingSigner) internal view returns (bytes32) {
+    function _activateDigest(uint64 pendingEpoch, address pendingSigner)
+        internal
+        view
+        returns (bytes32)
+    {
         return keccak256(
             abi.encode(w.ACTIVATE_TAG(), block.chainid, address(w), pendingEpoch, pendingSigner)
         );
@@ -297,7 +311,8 @@ contract WrappedBDXTest is Test {
         uint256 amt = 5_000 * COIN;
         w.mint(alice, amt, txid, 0, _mintSig(committeePk, alice, amt, txid));
 
-        string memory bdxAddr = "bxABCDEFdeadbeef00112233445566778899aabbccddeeff00112233445566778899";
+        string memory bdxAddr =
+            "bxABCDEFdeadbeef00112233445566778899aabbccddeeff00112233445566778899";
         vm.expectEmit(true, false, false, true, address(w));
         emit RedeemToNative(alice, 2_000 * COIN, bytes(bdxAddr));
         vm.prank(alice);
@@ -345,8 +360,9 @@ contract WrappedBDXTest is Test {
         // Staging a rotation is now blocked while paused.
         address newSigner = vm.addr(0xD00D);
         bytes memory rot = _sign(committeePk, _rotateDigest(2, newSigner));
+        uint64 _n = w.rotationNonce() + 1;
         vm.expectRevert(); // EnforcedPause
-        w.rotateSigner(newSigner, 2, rot);
+        w.rotateSigner(newSigner, 2, _n, type(uint256).max, rot);
         assertEq(w.pendingSigner(), address(0), "no rotation staged while paused");
 
         // The deliberate escape hatch still works: admin can repoint the signer.
@@ -360,7 +376,13 @@ contract WrappedBDXTest is Test {
     /// otherwise pausing on suspicion of compromise would not stop the cutover.
     function test_Pause_blocksActivation_ofAnAlreadyStagedRotation() public {
         (uint256 newPk, address newSigner) = _newSignerPair();
-        w.rotateSigner(newSigner, 2, _sign(committeePk, _rotateDigest(2, newSigner)));
+        w.rotateSigner(
+            newSigner,
+            2,
+            w.rotationNonce() + 1,
+            type(uint256).max,
+            _sign(committeePk, _rotateDigest(2, newSigner))
+        );
         vm.warp(w.pendingActivateAt());
 
         vm.prank(admin);
@@ -381,6 +403,56 @@ contract WrappedBDXTest is Test {
     // =================================================================================
     // Admin & caps (H.4) — bond-before-caps guard.
     // =================================================================================
+    // =================================================================================
+    // Amount hygiene
+    // =================================================================================
+
+    /// `mint` refuses a zero amount, matching `redeemToNative`. A zero-value deposit
+    /// would otherwise consume its replay slot while moving nothing.
+    function test_Mint_zeroAmountReverts() public {
+        bytes32 txid = keccak256("zero-mint");
+        bytes memory sig = _sign(committeePk, _mintDigestAt(alice, 0, txid, 0));
+        vm.expectRevert(WrappedBDX.ZeroAmount.selector);
+        w.mint(alice, 0, txid, 0, sig);
+    }
+
+    /// The redemption floor is checked BEFORE the burn. If it were enforced off-chain
+    /// instead, a refused release would leave the user with neither the wBDX nor the BDX.
+    function test_Redeem_belowMinimumRevertsWithoutBurning() public {
+        bytes32 txid = keccak256("dust-src");
+        w.mint(
+            alice, 10 * COIN, txid, 0, _sign(committeePk, _mintDigestAt(alice, 10 * COIN, txid, 0))
+        );
+
+        vm.prank(admin);
+        w.setMinRedeemAmount(1 * COIN);
+
+        uint256 before = w.balanceOf(alice);
+        vm.prank(alice);
+        vm.expectRevert(WrappedBDX.BelowMinRedeem.selector);
+        w.redeemToNative(1, "bxABC");
+        assertEq(w.balanceOf(alice), before, "dust redeem must not burn");
+
+        // At or above the floor it still works.
+        vm.prank(alice);
+        w.redeemToNative(1 * COIN, "bxABC");
+        assertEq(w.balanceOf(alice), before - 1 * COIN);
+    }
+
+    function test_SetMinRedeemAmount_isAdminOnly() public {
+        vm.prank(address(0xBAD));
+        vm.expectRevert(WrappedBDX.NotAdmin.selector);
+        w.setMinRedeemAmount(1 * COIN);
+    }
+
+    /// A per-transaction allowance above the window budget is unreachable and hides the
+    /// real limit from anyone reading the caps.
+    function test_SetCaps_perTxAboveWindowReverts() public {
+        vm.prank(admin);
+        vm.expectRevert(WrappedBDX.InvalidCaps.selector);
+        w.setCaps(100 * COIN, 101 * COIN);
+    }
+
     function test_SetCaps_aboveBondBacking_reverts() public {
         vm.prank(admin);
         vm.expectRevert(WrappedBDX.CapAboveBondBacking.selector);
@@ -453,8 +525,9 @@ contract WrappedBDXTest is Test {
         (uint256 newPk, address newSigner) = _newSignerPair();
         bytes memory rot = _sign(committeePk, _rotateDigest(2, newSigner));
 
+        uint64 _n = w.rotationNonce() + 1;
         vm.prank(relayer);
-        w.rotateSigner(newSigner, 2, rot);
+        w.rotateSigner(newSigner, 2, _n, type(uint256).max, rot);
         assertEq(w.pendingSigner(), newSigner);
 
         // Before the window elapses, activation reverts (state check fires before the sig).
@@ -486,33 +559,44 @@ contract WrappedBDXTest is Test {
         (, address newSigner) = _newSignerPair();
         // keyEpoch is 1; proposing epoch 1 (equal) must revert.
         bytes memory rot = _sign(committeePk, _rotateDigest(1, newSigner));
+        uint64 _n = w.rotationNonce() + 1;
         vm.expectRevert(WrappedBDX.StaleEpoch.selector);
-        w.rotateSigner(newSigner, 1, rot);
+        w.rotateSigner(newSigner, 1, _n, type(uint256).max, rot);
     }
 
     function test_Rotation_wrongContractDigest_reverts() public {
         (, address newSigner) = _newSignerPair();
         // Sign a rotate digest bound to a DIFFERENT contract address.
         bytes32 foreign = keccak256(
-            abi.encode(w.ROTATE_TAG(), block.chainid, address(0xDEAD), uint64(2), newSigner)
+            abi.encode(
+                w.ROTATE_TAG(),
+                block.chainid,
+                address(0xDEAD),
+                uint64(2),
+                newSigner,
+                w.rotationNonce() + 1,
+                type(uint256).max
+            )
         );
         bytes memory rot = _sign(committeePk, foreign);
+        uint64 _n = w.rotationNonce() + 1;
         vm.expectRevert(WrappedBDX.BadSigner.selector);
-        w.rotateSigner(newSigner, 2, rot);
+        w.rotateSigner(newSigner, 2, _n, type(uint256).max, rot);
     }
 
     function test_Rotation_notByCurrentSigner_reverts() public {
         (, address newSigner) = _newSignerPair();
         // Signed by a non-committee key.
         bytes memory rot = _sign(0xBADBAD, _rotateDigest(2, newSigner));
+        uint64 _n = w.rotationNonce() + 1;
         vm.expectRevert(WrappedBDX.BadSigner.selector);
-        w.rotateSigner(newSigner, 2, rot);
+        w.rotateSigner(newSigner, 2, _n, type(uint256).max, rot);
     }
 
     function test_Rotation_vetoedCannotActivate() public {
         (uint256 newPk, address newSigner) = _newSignerPair();
         bytes memory rot = _sign(committeePk, _rotateDigest(2, newSigner));
-        w.rotateSigner(newSigner, 2, rot);
+        w.rotateSigner(newSigner, 2, w.rotationNonce() + 1, type(uint256).max, rot);
 
         vm.prank(admin);
         w.vetoRotation();
@@ -537,7 +621,7 @@ contract WrappedBDXTest is Test {
         bytes memory rotSig = _sign(committeePk, _rotateDigest(2, newSigner));
         bytes memory actSig = _activateSig(newPk, 2, newSigner);
 
-        w.rotateSigner(newSigner, 2, rotSig);
+        w.rotateSigner(newSigner, 2, w.rotationNonce() + 1, type(uint256).max, rotSig);
         vm.prank(admin);
         w.vetoRotation();
         assertTrue(w.vetoedProposals(keccak256(abi.encode(newSigner, uint64(2)))));
@@ -545,8 +629,9 @@ contract WrappedBDXTest is Test {
         // Months later, a stranger replays the original signature.
         vm.warp(block.timestamp + 90 days);
         vm.prank(address(0xBAD));
+        uint64 _n = w.rotationNonce() + 1;
         vm.expectRevert(WrappedBDX.RotationIsVetoed.selector);
-        w.rotateSigner(newSigner, 2, rotSig);
+        w.rotateSigner(newSigner, 2, _n, type(uint256).max, rotSig);
 
         // Nothing was staged, so the stale activation proof has nothing to activate.
         vm.prank(address(0xBAD));
@@ -561,14 +646,26 @@ contract WrappedBDXTest is Test {
     /// off to a different successor, so the bridge is not bricked by a veto.
     function test_Rotation_vetoBlocksOnlyTheRejectedProposal() public {
         (, address rejected) = _newSignerPair();
-        w.rotateSigner(rejected, 2, _sign(committeePk, _rotateDigest(2, rejected)));
+        w.rotateSigner(
+            rejected,
+            2,
+            w.rotationNonce() + 1,
+            type(uint256).max,
+            _sign(committeePk, _rotateDigest(2, rejected))
+        );
         vm.prank(admin);
         w.vetoRotation();
 
         // A different successor at the same epoch is fine.
         uint256 goodPk = 0xC0D0;
         address good = vm.addr(goodPk);
-        w.rotateSigner(good, 2, _sign(committeePk, _rotateDigest(2, good)));
+        w.rotateSigner(
+            good,
+            2,
+            w.rotationNonce() + 1,
+            type(uint256).max,
+            _sign(committeePk, _rotateDigest(2, good))
+        );
         vm.warp(w.pendingActivateAt());
         w.activateRotation(_activateSig(goodPk, 2, good));
         assertEq(w.currentSigner(), good);
@@ -577,7 +674,13 @@ contract WrappedBDXTest is Test {
     /// H-3: a veto raised in error can be cleared by the admin, and only the admin.
     function test_Rotation_clearVetoedProposal_isAdminOnly() public {
         (uint256 newPk, address newSigner) = _newSignerPair();
-        w.rotateSigner(newSigner, 2, _sign(committeePk, _rotateDigest(2, newSigner)));
+        w.rotateSigner(
+            newSigner,
+            2,
+            w.rotationNonce() + 1,
+            type(uint256).max,
+            _sign(committeePk, _rotateDigest(2, newSigner))
+        );
         vm.prank(admin);
         w.vetoRotation();
 
@@ -587,10 +690,142 @@ contract WrappedBDXTest is Test {
         vm.prank(admin);
         w.clearVetoedProposal(newSigner, 2);
 
-        w.rotateSigner(newSigner, 2, _sign(committeePk, _rotateDigest(2, newSigner)));
+        w.rotateSigner(
+            newSigner,
+            2,
+            w.rotationNonce() + 1,
+            type(uint256).max,
+            _sign(committeePk, _rotateDigest(2, newSigner))
+        );
         vm.warp(w.pendingActivateAt());
         w.activateRotation(_activateSig(newPk, 2, newSigner));
         assertEq(w.currentSigner(), newSigner);
+    }
+
+    // =================================================================================
+    // Rotation authorization is single-use and time-bounded
+    // =================================================================================
+
+    /// A relayed proposal cannot be replayed to restart the challenge window. Without a
+    /// single-use nonce anyone could re-send the public calldata before each deadline and
+    /// stall the hand-off forever.
+    function test_Rotation_replayCannotStallTheChallengeWindow() public {
+        (, address newSigner) = _newSignerPair();
+        uint64 n = w.rotationNonce() + 1;
+        bytes memory rot = _sign(committeePk, _rotateDigest(2, newSigner));
+
+        w.rotateSigner(newSigner, 2, n, type(uint256).max, rot);
+        uint256 deadlineAfterFirst = w.pendingActivateAt();
+
+        // The identical, publicly visible calldata is now inert.
+        vm.warp(deadlineAfterFirst - 1);
+        vm.expectRevert(WrappedBDX.BadRotationNonce.selector);
+        w.rotateSigner(newSigner, 2, n, type(uint256).max, rot);
+
+        // The window therefore still closes on schedule.
+        assertEq(w.pendingActivateAt(), deadlineAfterFirst, "window was not restarted");
+    }
+
+    /// An authorization that was signed but never relayed must not stay valid forever.
+    function test_Rotation_expiredAuthorizationReverts() public {
+        (, address newSigner) = _newSignerPair();
+        uint64 n = w.rotationNonce() + 1;
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 d = keccak256(
+            abi.encode(w.ROTATE_TAG(), block.chainid, address(w), uint64(2), newSigner, n, deadline)
+        );
+        bytes memory rot = _sign(committeePk, d);
+
+        vm.warp(deadline + 1);
+        vm.expectRevert(WrappedBDX.RotationAuthorizationExpired.selector);
+        w.rotateSigner(newSigner, 2, n, deadline, rot);
+    }
+
+    /// The nonce must be exactly the next one; a gap or a stale value is refused.
+    function test_Rotation_nonceMustBeExactlyNext() public {
+        (, address newSigner) = _newSignerPair();
+        bytes32 d = keccak256(
+            abi.encode(
+                w.ROTATE_TAG(),
+                block.chainid,
+                address(w),
+                uint64(2),
+                newSigner,
+                uint64(5),
+                type(uint256).max
+            )
+        );
+        bytes memory rot = _sign(committeePk, d);
+        vm.expectRevert(WrappedBDX.BadRotationNonce.selector);
+        w.rotateSigner(newSigner, 2, 5, type(uint256).max, rot);
+    }
+
+    // =================================================================================
+    // Two-step admin transfer
+    // =================================================================================
+
+    function test_Admin_transferRequiresAcceptance() public {
+        address newAdmin = address(0xA11CE);
+
+        vm.prank(admin);
+        w.transferAdmin(newAdmin);
+
+        // Not yet in force: the old admin still governs.
+        assertEq(w.admin(), admin, "admin changed before acceptance");
+        assertEq(w.pendingAdmin(), newAdmin);
+
+        vm.prank(newAdmin);
+        w.acceptAdmin();
+        assertEq(w.admin(), newAdmin, "acceptance did not complete the transfer");
+        assertEq(w.pendingAdmin(), address(0), "nomination not cleared");
+    }
+
+    /// A mistyped destination cannot strand governance: nobody else can accept, and the
+    /// current admin keeps every power until someone does.
+    function test_Admin_mistypedNomineeCannotStrandGovernance() public {
+        address typo = address(0xDEADBEEF);
+        vm.prank(admin);
+        w.transferAdmin(typo);
+
+        vm.prank(address(0xBAD));
+        vm.expectRevert(WrappedBDX.NotPendingAdmin.selector);
+        w.acceptAdmin();
+
+        // The real admin can still act, and can re-nominate correctly.
+        vm.prank(admin);
+        w.pause();
+        assertTrue(w.paused());
+
+        vm.prank(admin);
+        w.transferAdmin(address(0xA11CE));
+        assertEq(w.pendingAdmin(), address(0xA11CE), "re-nomination failed");
+    }
+
+    // =================================================================================
+    // Break-glass signers lapse at the next rotation
+    // =================================================================================
+
+    /// A recovery key is authorized for the epoch it was added in, and no longer.
+    function test_BreakGlassSigner_lapsesOnTheNextRotation() public {
+        (uint256 recoveryPk, address recovery) = _newSignerPair();
+        vm.prank(admin);
+        w.addSigner(recovery);
+        assertEq(w.signerEpoch(recovery), w.keyEpoch());
+
+        // Works while the epoch it was authorized for is live.
+        bytes32 t1 = keccak256("lapse-1");
+        w.mint(alice, 1 * COIN, t1, 0, _sign(recoveryPk, _mintDigestAt(alice, 1 * COIN, t1, 0)));
+
+        // Governance moves the key on to a DIFFERENT signer.
+        address successor = vm.addr(0xACE55);
+        vm.prank(admin);
+        w.breakGlassSetSigner(successor, 2);
+
+        // The recovery key is now inert, without anyone having to remember to remove it.
+        bytes32 t2 = keccak256("lapse-2");
+        bytes memory sig = _sign(recoveryPk, _mintDigestAt(alice, 1 * COIN, t2, 0));
+        vm.expectRevert(WrappedBDX.BadSigner.selector);
+        w.mint(alice, 1 * COIN, t2, 0, sig);
     }
 
     function test_Rotation_breakGlassWhenNoHandoff() public {
