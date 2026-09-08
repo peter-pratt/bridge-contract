@@ -98,16 +98,28 @@ contract DevnetRotate is Script {
             "successor equals the outgoing key - run a *fresh* DKG (cggmp21 0.6.3 has no refresh)"
         );
 
+        // Single-use authorization: the contract requires rotationNonce + 1 and spends it
+        // on success, so this proposal cannot be relayed twice.
+        uint64 nonce = w.rotationNonce() + 1;
+        // Bounded relay window. Override with ROTATE_DEADLINE for a longer ceremony.
+        uint256 deadline = vm.envOr("ROTATE_DEADLINE", block.timestamp + 1 days);
+        require(deadline > block.timestamp, "ROTATE_DEADLINE is already in the past");
+
         // Mirrors WrappedBDX.rotateSigner exactly. Note the field order differs from the
         // mint digest: epoch precedes signer here.
-        bytes32 digest =
-            keccak256(abi.encode(w.ROTATE_TAG(), block.chainid, address(w), newEpoch, newSigner));
+        bytes32 digest = keccak256(
+            abi.encode(
+                w.ROTATE_TAG(), block.chainid, address(w), newEpoch, newSigner, nonce, deadline
+            )
+        );
+        console2.log("rotate nonce    :", uint256(nonce));
+        console2.log("rotate deadline :", deadline);
         console2.log("rotate digest   :", vm.toString(digest));
 
         bytes memory sig = _assemble(digest, rs, outgoing);
 
         vm.startBroadcast();
-        w.rotateSigner(newSigner, newEpoch, sig);
+        w.rotateSigner(newSigner, newEpoch, nonce, deadline, sig);
         vm.stopBroadcast();
 
         console2.log("");
@@ -119,7 +131,10 @@ contract DevnetRotate is Script {
         console2.log("  vetoed           :", w.rotationVetoed());
 
         // The contract must NOT have switched yet — that is the whole point of H.6.2.
-        require(w.currentSigner() == outgoing, "currentSigner moved at propose time - challenge window is not being honoured");
+        require(
+            w.currentSigner() == outgoing,
+            "currentSigner moved at propose time - challenge window is not being honoured"
+        );
         require(w.keyEpoch() == curEpoch, "keyEpoch moved at propose time");
         console2.log("  currentSigner unchanged during the challenge window - correct");
     }

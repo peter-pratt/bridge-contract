@@ -85,14 +85,21 @@ if [ "$(lower "$ACTIVATE_TAG_ONCHAIN")" != "$EXPECT_ACTIVATE_TAG" ]; then
 fi
 
 # --- the preimage ---------------------------------------------------------------------
+# The authorization is single-use and time-bounded: the contract requires
+# rotationNonce + 1 and spends it, so this proposal cannot be relayed twice.
+NONCE="$(( $(cast call "$PROXY" 'rotationNonce()(uint64)' --rpc-url "$RPC" | awk '{print $1}') + 1 ))"
+DEADLINE="${ROTATE_DEADLINE:-$(( $(date +%s) + 86400 ))}"
+
 # Mirrors WrappedBDX.rotateSigner:
-#   keccak256(abi.encode(ROTATE_TAG, block.chainid, address(this), newKeyEpoch, newSigner))
-# Five static words = 160 bytes. Note the ordering: epoch BEFORE signer (the mint tuple
+#   keccak256(abi.encode(ROTATE_TAG, block.chainid, address(this), newKeyEpoch, newSigner,
+#                        nonce, deadline))
+# Seven static words = 224 bytes. Note the ordering: epoch BEFORE signer (the mint tuple
 # puts the address first) — getting this backwards produces a valid-looking signature
 # that fails with BadSigner much later.
 PREIMAGE="$(cast abi-encode \
-  'f(bytes32,uint256,address,uint64,address)' \
-  "$ROTATE_TAG_ONCHAIN" "$CHAIN_ID" "$PROXY" "$NEW_KEY_EPOCH" "$NEW_SIGNER")"
+  'f(bytes32,uint256,address,uint64,address,uint64,uint256)' \
+  "$ROTATE_TAG_ONCHAIN" "$CHAIN_ID" "$PROXY" "$NEW_KEY_EPOCH" "$NEW_SIGNER" \
+  "$NONCE" "$DEADLINE")"
 DIGEST="$(cast keccak "$PREIMAGE")"
 
 # --- the ACTIVATION preimage (H.6.2b) -------------------------------------------------
@@ -118,6 +125,8 @@ OUTGOING_SIGNER=$CUR_SIGNER
 CUR_KEY_EPOCH=$CUR_EPOCH
 NEW_SIGNER=$NEW_SIGNER
 NEW_KEY_EPOCH=$NEW_KEY_EPOCH
+ROTATE_NONCE=$NONCE
+ROTATE_DEADLINE=$DEADLINE
 ROTATE_TIMELOCK=$TIMELOCK
 ROTATE_PREIMAGE=$PREIMAGE
 ROTATE_DIGEST=$DIGEST
@@ -135,7 +144,7 @@ cat <<EOF
   incoming signer : $NEW_SIGNER   (keyEpoch $NEW_KEY_EPOCH)
   ROTATE_TAG      : $ROTATE_TAG_ONCHAIN  (keccak-verified)
   challenge window: ${TIMELOCK}s
-  preimage        : $(( HEXLEN / 2 )) bytes ($HEXLEN hex chars, expect 160 / 320)
+  preimage        : $(( HEXLEN / 2 )) bytes ($HEXLEN hex chars, expect 224 / 448)
   digest          : $DIGEST
 
   written to devnet/rotate.env
@@ -159,8 +168,8 @@ cat <<EOF
 
 EOF
 
-if [ "$HEXLEN" -ne 320 ]; then
-  echo "  !! expected 320 hex chars (160 bytes / 5 ABI words) — got $HEXLEN."
+if [ "$HEXLEN" -ne 448 ]; then
+  echo "  !! expected 448 hex chars (224 bytes / 7 ABI words) — got $HEXLEN."
   echo "     Check the cast version's handling of the uint64 word."
   exit 1
 fi

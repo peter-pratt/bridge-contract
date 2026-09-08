@@ -129,6 +129,7 @@ echo ""
 # =======================================================================================
 echo "── propose ────────────────────────────────────────────────────────────"
 PROXY="$PROXY" NEW_SIGNER="$NEW_SIGNER" NEW_KEY_EPOCH="$NEW_KEY_EPOCH" ROTATE_RS="$RS" \
+ROTATE_DEADLINE="$ROTATE_DEADLINE" \
   forge script script/DevnetRotate.s.sol:DevnetRotate --sig 'propose()' \
     --rpc-url "$RPC" --private-key "$DEPLOYER_KEY" --broadcast -vv
 
@@ -247,9 +248,13 @@ cast logs --rpc-url "$RPC" --address "$PROXY" "$ROTATED_TOPIC" --from-block 0 2>
 # =======================================================================================
 echo ""
 echo "── replay the rotation (must be rejected) ─────────────────────────────"
-STALE="$(cast call "$PROXY" 'rotateSigner(address,uint64,bytes)' \
-          "$NEW_SIGNER" "$NEW_KEY_EPOCH" "${RS}1b" --rpc-url "$RPC" 2>&1 || true)"
+# The nonce was spent by the accepted proposal, so a replay is now refused on the
+# nonce before the epoch is even considered.
+STALE="$(cast call "$PROXY" 'rotateSigner(address,uint64,uint64,uint256,bytes)' \
+          "$NEW_SIGNER" "$NEW_KEY_EPOCH" "$ROTATE_NONCE" "$ROTATE_DEADLINE" "${RS}1b" \
+          --rpc-url "$RPC" 2>&1 || true)"
 case "$STALE" in
+  *BadRotationNonce*|*6d86fa41*) echo "-> BadRotationNonce()  the authorization is single-use" ;;
   *StaleEpoch*|*68549ea1*) echo "-> StaleEpoch()  anti-rollback holds" ;;
   *BadSigner*|*61330e93*)  echo "-> BadSigner()   (rejected, though on the signature not the epoch —" ;
                            echo "                 expected, since this probe appends a guessed v)" ;;

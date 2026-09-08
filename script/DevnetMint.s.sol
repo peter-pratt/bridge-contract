@@ -43,8 +43,9 @@ contract DevnetMint is Script {
         address signer = w.currentSigner();
 
         // Recompute the digest the way mint() does, from live chain state.
-        bytes32 digest =
-            keccak256(abi.encode(w.MINT_TAG(), block.chainid, proxy, to, amount, beldexTxid, uint32(0)));
+        bytes32 digest = keccak256(
+            abi.encode(w.MINT_TAG(), block.chainid, proxy, to, amount, beldexTxid, uint32(0))
+        );
         console2.log("digest       :", vm.toString(digest));
         console2.log("currentSigner:", signer);
 

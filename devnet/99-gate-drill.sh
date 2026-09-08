@@ -37,12 +37,23 @@ echo "  proxy $PROXY"
 [ "$(cast call $PROXY 'currentSigner()(address)' --rpc-url $RPC)" = "$OLD_ADDR" ] && ok "currentSigner = outgoing" || bad "wrong signer"
 
 say "1. outgoing committee proposes the successor"
-RD=$(cast keccak "$(cast abi-encode 'f(bytes32,uint256,address,uint64,address)' \
-      "$(cast call $PROXY 'ROTATE_TAG()(bytes32)' --rpc-url $RPC)" "$CHAIN" "$PROXY" 2 "$NEW_ADDR")")
+NONCE=$(( $(cast call $PROXY 'rotationNonce()(uint64)' --rpc-url $RPC | awk '{print $1}') + 1 ))
+DEADLINE=$(( $(date +%s) + 86400 ))
+RD=$(cast keccak "$(cast abi-encode 'f(bytes32,uint256,address,uint64,address,uint64,uint256)' \
+      "$(cast call $PROXY 'ROTATE_TAG()(bytes32)' --rpc-url $RPC)" "$CHAIN" "$PROXY" 2 "$NEW_ADDR" \
+      "$NONCE" "$DEADLINE")")
 RSIG=$(cast wallet sign --private-key "$OLD_KEY" --no-hash "$RD")
-cast send "$PROXY" 'rotateSigner(address,uint64,bytes)' "$NEW_ADDR" 2 "$RSIG" \
+cast send "$PROXY" 'rotateSigner(address,uint64,uint64,uint256,bytes)' \
+  "$NEW_ADDR" 2 "$NONCE" "$DEADLINE" "$RSIG" \
   --rpc-url "$RPC" --private-key "$DEPLOYER_KEY" >/dev/null
 ok "pendingSigner = $(cast call $PROXY 'pendingSigner()(address)' --rpc-url $RPC)"
+
+say "1b. the same proposal must not replay (it would otherwise restart the window)"
+case "$(tryrevert "$PROXY" 'rotateSigner(address,uint64,uint64,uint256,bytes)' \
+        "$NEW_ADDR" 2 "$NONCE" "$DEADLINE" "$RSIG")" in
+  *BadRotationNonce*|*6d86fa41*) ok "replay refused: the authorization is single-use" ;;
+  *) bad "replay was NOT refused" ;;
+esac
 
 say "2. before the window closes, activation must be refused"
 case "$(tryrevert "$PROXY" 'activateRotation(bytes)' 0x)" in

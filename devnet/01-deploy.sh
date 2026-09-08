@@ -39,6 +39,7 @@ AMOUNT="${AMOUNT:-12345000000}"                    # 12.345 BDX
 PER_TX_MAX="${PER_TX_MAX:-1000000000000}"          # 1,000 BDX
 WINDOW_MINT_CAP="${WINDOW_MINT_CAP:-10000000000000}"       # 10,000 BDX / window
 BOND_BACKING_CAP_LIMIT="${BOND_BACKING_CAP_LIMIT:-100000000000000}"  # 100,000 BDX
+MIN_REDEEM_AMOUNT="${MIN_REDEEM_AMOUNT:-1000000}"          # 0.001 BDX - dust floor
 EPOCH_SECONDS="${EPOCH_SECONDS:-86400}"
 ROTATE_TIMELOCK="${ROTATE_TIMELOCK:-3600}"
 TO="${TO:-$DEPLOYER}"
@@ -99,6 +100,13 @@ PROXY_JSON="$(forge create \
 PROXY="$(deployed "$PROXY_JSON")"
 [ -n "$PROXY" ] || { echo "could not parse proxy address from: $PROXY_JSON"; exit 1; }
 echo "proxy: $PROXY"
+
+# The redemption floor is not an initialize argument (so an already-deployed proxy can
+# adopt it too); the deployer sets it immediately after.
+say "set the redemption floor"
+cast send "$PROXY" 'setMinRedeemAmount(uint256)' "$MIN_REDEEM_AMOUNT" \
+  --rpc-url "$RPC" --private-key "$DEPLOYER_KEY" >/dev/null
+echo "minRedeemAmount: $MIN_REDEEM_AMOUNT"
 
 # ── 4. sanity-read the live state ────────────────────────────────────────────
 say "on-chain state"
