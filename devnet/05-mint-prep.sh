@@ -131,9 +131,13 @@ if [ "$(lc "$ALLOWLISTED")" != "false" ]; then
 fi
 echo "isSigner[retired] = false ✓  (so BadSigner, if it fires, is about the rotation)"
 
-SPENT="$(cast call "$PROXY" 'processedDeposits(bytes32)(bool)' "$TXID" --rpc-url "$RPC")"
+# Per-OUTPUT key: mint() records keccak256(abi.encode(beldexTxid, outputIndex)) and only
+# READS the bare txid, as a legacy guard. Asking about the bare txid reports "unspent" for a
+# deposit that has in fact been minted, and the proof then dies on Replay() at leg B.
+DEPOSIT_ID="$(cast keccak "$(cast abi-encode 'f(bytes32,uint32)' "$TXID" 0)")"
+SPENT="$(cast call "$PROXY" 'processedDeposits(bytes32)(bool)' "$DEPOSIT_ID" --rpc-url "$RPC")"
 if [ "$(lc "$SPENT")" != "false" ]; then
-  echo "!! processedDeposits[$TXID] is already true — pick another txid." >&2
+  echo "!! processedDeposits[keccak($TXID, 0)] is already true — pick another txid." >&2
   exit 1
 fi
 echo "the txid is unspent ✓"

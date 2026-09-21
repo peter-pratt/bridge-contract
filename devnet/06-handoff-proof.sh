@@ -196,14 +196,19 @@ PROXY="$PROXY" TO="$TO" AMOUNT="$AMOUNT" BELDEX_TXID="$BELDEX_TXID" SIG_RS="0x$S
 say "verify"
 BAL_AFTER="$(num "$(cast call "$PROXY" 'balanceOf(address)(uint256)' "$TO" --rpc-url "$RPC")")"
 SUPPLY_AFTER="$(num "$(cast call "$PROXY" 'totalSupply()(uint256)' --rpc-url "$RPC")")"
-SPENT="$(cast call "$PROXY" 'processedDeposits(bytes32)(bool)' "$BELDEX_TXID" --rpc-url "$RPC")"
+# The replay guard is keyed per gateway OUTPUT: mint() records
+# keccak256(abi.encode(beldexTxid, outputIndex)) and only READS the bare txid, as a legacy
+# check for deposits minted before that change. Querying the bare txid reports false after
+# every successful mint. This proof mints output 0.
+DEPOSIT_ID="$(cast keccak "$(cast abi-encode 'f(bytes32,uint32)' "$BELDEX_TXID" 0)")"
+SPENT="$(cast call "$PROXY" 'processedDeposits(bytes32)(bool)' "$DEPOSIT_ID" --rpc-url "$RPC")"
 CUR_AFTER="$(lc "$(cast call "$PROXY" 'currentSigner()(address)' --rpc-url "$RPC")")"
 EPOCH_AFTER="$(num "$(cast call "$PROXY" 'keyEpoch()(uint64)' --rpc-url "$RPC")")"
 
 printf 'balance  %s -> %s   (delta %s, expected %s)\n' \
   "$BAL_BEFORE" "$BAL_AFTER" "$(( BAL_AFTER - BAL_BEFORE ))" "$AMOUNT"
 printf 'supply   %s -> %s\n' "$SUPPLY_BEFORE" "$SUPPLY_AFTER"
-printf 'processedDeposits[%s] = %s\n' "$BELDEX_TXID" "$SPENT"
+printf 'processedDeposits[keccak(%s, 0)] = %s\n' "$BELDEX_TXID" "$SPENT"
 printf 'currentSigner %s (keyEpoch %s)\n' "$CUR_AFTER" "$EPOCH_AFTER"
 
 [ "$(( BAL_AFTER - BAL_BEFORE ))" -eq "$AMOUNT" ] || fail "balance did not move by exactly AMOUNT"
@@ -216,7 +221,7 @@ echo "balance, supply, replay flag ✓ — and the mint moved neither currentSig
 
 say "Minted event for this txid"
 MINTED_LOGS="$(cast logs --from-block 0 --address "$PROXY" \
-  "$(cast sig-event 'Minted(address,uint256,bytes32)')" --rpc-url "$RPC" 2>/dev/null || true)"
+  "$(cast sig-event 'Minted(address,uint256,bytes32,uint32)')" --rpc-url "$RPC" 2>/dev/null || true)"
 if printf '%s\n' "$MINTED_LOGS" | grep -qi "${BELDEX_TXID#0x}"; then
   printf '%s\n' "$MINTED_LOGS" | grep -i -B6 -A6 "${BELDEX_TXID#0x}"
   echo "  a Minted log carries this beldexTxid as an indexed topic ✓"

@@ -74,7 +74,12 @@ contract DevnetMint is Script {
         console2.log("totalSupply   :", w.totalSupply());
         console2.log("windowMinted  :", w.windowMinted());
         require(w.balanceOf(to) == balBefore + amount, "balance did not increase by amount");
-        require(w.processedDeposits(beldexTxid), "deposit not marked processed");
+        // The replay guard is keyed per gateway OUTPUT, not per transaction: mint() records
+        // keccak256(abi.encode(beldexTxid, outputIndex)) and only READS the bare txid, as a
+        // legacy check for deposits minted before that change. Asserting on the bare txid
+        // therefore fails every mint, however correct.
+        bytes32 depositId = keccak256(abi.encode(beldexTxid, uint32(0)));
+        require(w.processedDeposits(depositId), "deposit not marked processed");
         console2.log("MINT OK - replay guard armed for this beldexTxid");
     }
 }
