@@ -1,4 +1,4 @@
-# H.6 rotation — DKG generation 2
+# H.6 rotation — DKG generation 3
 
 Run by rotate-ceremony.sh. Every value below was read back off the chain or off disk
 after the fact, not carried forward from the step that produced it.
@@ -6,13 +6,13 @@ after the fact, not carried forward from the step that produced it.
 | | |
 |---|---|
 | contract | `0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512` (chain id 31337) |
-| outgoing signer | `0x60aafd43d4495b934908cd056df08b4e5c6c1060` (keyEpoch 1, DKG generation 1) |
-| incoming signer | `0x838a9101e9d6e3230e826815082ff090d7d5b395` (keyEpoch 2, DKG generation 2) |
-| incoming group key | `0x0348a6c7094dcb1d4b7ced81a53e03e8ec951c7fab7832b5bc62cc9ec08c062dc9` |
-| rotation digest | `0xce5d66037adc0f39d282544a8af52b13c20c614215bdfa3f624348d8c323a2d7` |
+| outgoing signer | `0x838a9101e9d6e3230e826815082ff090d7d5b395` (keyEpoch 2, DKG generation 2) |
+| incoming signer | `0x2f0a890f9e8effd65dee9d95ba8e174cdb1ffa2d` (keyEpoch 3, DKG generation 3) |
+| incoming group key | `0x03b8ea73261ef93e0b31e14a363a5398ca96857d235bc2688e46f2f487a67479e0` |
+| rotation digest | `0x8502e5921f26d4e9c1d8b0127c773d36dfd422380adcaae32f117f161e31871f` |
 | challenge window | 120s |
-| retired share tree | `devnet/shares-gen1` (retained on every node) |
-| hand-off proof txid | `0x179c9e85db97c013f7ce7a84b5d939e6efe4fa53243d42680a2b6b2a32283db9` |
+| retired share tree | `devnet/shares-gen2` (retained on every node) |
+| hand-off proof txid | `0x1e3803b9183d75031ebfd5c9c80221aaf61fe9564209a1c8bf40bbbe4f1c4588` |
 
 The outgoing committee threshold-signed its own replacement; no admin key was used at any
 point, and `breakGlassSetSigner` was not called. The retired committee's signature over the
