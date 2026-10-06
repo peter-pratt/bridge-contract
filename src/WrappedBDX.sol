@@ -118,6 +118,16 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
     ///         after the fact would destroy the tokens and pay nothing. 0 disables it.
     uint256 public minRedeemAmount;
 
+    /// @notice Native fee (atomic BDX) withheld from the release of every burn. The signers
+    ///         read it and build and verify each release with exactly this fee, so a burn
+    ///         at or below it could never be paid — it is refused here, before the wBDX is
+    ///         destroyed. Set once; 0 means not yet configured, and no burn is accepted.
+    uint256 public redemptionFee;
+
+    /// @notice Largest single native release the Beldex chain accepts (consensus
+    ///         `GATEWAY_RELEASE_PER_TX_MAX`, 50,000 BDX). A larger burn could never be paid.
+    uint256 public constant NATIVE_RELEASE_MAX = 50_000e9; // 9 decimals, as wBDX
+
     // --- Events ----------------------------------------------------------------------
     event Minted(
         address indexed to, uint256 amount, bytes32 indexed beldexTxid, uint32 outputIndex
@@ -132,6 +142,7 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
     event SignerRemoved(address indexed signer);
     event CapsSet(uint256 windowMintCap, uint256 perTxMax);
     event MinRedeemAmountSet(uint256 minRedeemAmount);
+    event RedemptionFeeConfigured(uint256 redemptionFee);
     event BondBackingCapLimitSet(uint256 bondBackingCapLimit);
     event AdminTransferStarted(address indexed currentAdmin, address indexed pendingAdmin);
     event AdminTransferred(address indexed previousAdmin, address indexed newAdmin);
@@ -157,6 +168,11 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
     error CapAboveBondBacking();
     error BadRedeemAddress();
     error ZeroAmount();
+    error RedemptionFeeNotConfigured();
+    error RedemptionFeeAlreadyConfigured();
+    error InvalidRedemptionFee();
+    error AtOrBelowRedemptionFee();
+    error AboveNativeReleaseMax();
 
     modifier onlyAdmin() {
         if (msg.sender != admin) revert NotAdmin();
@@ -282,6 +298,12 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
         // neither the wBDX nor the BDX.
         if (amount < minRedeemAmount) revert BelowMinRedeem();
         if (amount > perTxMax) revert PerTxCap();
+        // The native side must be able to pay it: a release carries `amount - fee`, so the
+        // burn has to exceed the fee, and it cannot exceed what one native release may move.
+        uint256 fee = redemptionFee;
+        if (fee == 0) revert RedemptionFeeNotConfigured();
+        if (amount <= fee) revert AtOrBelowRedemptionFee();
+        if (amount > NATIVE_RELEASE_MAX) revert AboveNativeReleaseMax();
         bytes memory addr = bytes(beldexAddress);
         // Shape-only: reject empty and absurdly long. Burn is irreversible, so err on the
         // permissive side — an unroutable-but-well-formed address is an off-chain concern.
@@ -485,6 +507,17 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
         emit MinRedeemAmountSet(newMin);
     }
 
+    /// @notice Set the native fee withheld from every release, once. It cannot be changed
+    ///         afterwards: signers build and verify releases with it, and a burn already
+    ///         accepted under one fee must be paid under that fee. Changing it is a reviewed
+    ///         upgrade, not an admin call.
+    function configureRedemptionFee(uint256 fee) external onlyAdmin {
+        if (redemptionFee != 0) revert RedemptionFeeAlreadyConfigured();
+        if (fee == 0 || fee >= NATIVE_RELEASE_MAX) revert InvalidRedemptionFee();
+        redemptionFee = fee;
+        emit RedemptionFeeConfigured(fee);
+    }
+
     function transferAdmin(address newAdmin) external onlyAdmin {
         if (newAdmin == address(0)) revert ZeroAddress();
         pendingAdmin = newAdmin;
@@ -503,8 +536,8 @@ contract WrappedBDX is Initializable, ERC20Upgradeable, PausableUpgradeable, UUP
     function _authorizeUpgrade(address) internal override onlyAdmin { }
 
     /// @dev Storage gap for future upgrades (this contract's own vars only; OZ v5 bases
-    ///      use ERC-7201 namespaced storage and need no gap). Reduced 40 -> 36: every new
-    ///      variable was appended and `rotationNonce` packed into `admin`'s spare bytes,
-    ///      so every pre-existing slot keeps its index.
-    uint256[36] private __gap;
+    ///      use ERC-7201 namespaced storage and need no gap). Reduced 40 -> 36 -> 35: every
+    ///      new variable was appended (`redemptionFee` last) and `rotationNonce` packed into
+    ///      `admin`'s spare bytes, so every pre-existing slot keeps its index.
+    uint256[35] private __gap;
 }

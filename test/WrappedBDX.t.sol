@@ -33,16 +33,23 @@ contract WrappedBDXTest is Test {
     uint256 internal constant BOND_LIMIT = 1_400_000 * COIN; // (t+1)*100k, §7-bis headroom
     uint256 internal constant EPOCH_SECONDS = 1 days;
     uint256 internal constant ROTATE_TIMELOCK = 2 days;
+    uint256 internal constant FEE = COIN / 10; // the devnet redemption fee, 0.1 BDX
 
     function setUp() public {
         committee = vm.addr(committeePk);
+        w = _deploy();
+        vm.prank(admin);
+        w.configureRedemptionFee(FEE);
+        vm.warp(10 * EPOCH_SECONDS + 123); // land mid-window, deterministic
+    }
+
+    function _deploy() internal returns (WrappedBDX) {
         WrappedBDX impl = new WrappedBDX();
         bytes memory init = abi.encodeCall(
             WrappedBDX.initialize,
             (admin, committee, WINDOW_CAP, PER_TX_MAX, BOND_LIMIT, EPOCH_SECONDS, ROTATE_TIMELOCK)
         );
-        w = WrappedBDX(address(new ERC1967Proxy(address(impl), init)));
-        vm.warp(10 * EPOCH_SECONDS + 123); // land mid-window, deterministic
+        return WrappedBDX(address(new ERC1967Proxy(address(impl), init)));
     }
 
     // ---- signing helpers -----------------------------------------------------------
@@ -443,6 +450,98 @@ contract WrappedBDXTest is Test {
         vm.prank(address(0xBAD));
         vm.expectRevert(WrappedBDX.NotAdmin.selector);
         w.setMinRedeemAmount(1 * COIN);
+    }
+
+    // =================================================================================
+    // Redemption fee — the native fee every release withholds, read by the signers
+    // =================================================================================
+
+    event RedemptionFeeConfigured(uint256 redemptionFee);
+
+    /// Admin-only, non-zero, below one native release, and set exactly once: signers build
+    /// every release with it, so a burn accepted under one fee must be paid under that fee.
+    function test_RedemptionFee_configuredOnceByAdmin() public {
+        WrappedBDX fresh = _deploy();
+        assertEq(fresh.redemptionFee(), 0, "unset after initialize");
+
+        vm.prank(address(0xBAD));
+        vm.expectRevert(WrappedBDX.NotAdmin.selector);
+        fresh.configureRedemptionFee(FEE);
+
+        vm.startPrank(admin);
+        vm.expectRevert(WrappedBDX.InvalidRedemptionFee.selector);
+        fresh.configureRedemptionFee(0);
+        uint256 max = fresh.NATIVE_RELEASE_MAX();
+        vm.expectRevert(WrappedBDX.InvalidRedemptionFee.selector);
+        fresh.configureRedemptionFee(max);
+
+        vm.expectEmit(false, false, false, true, address(fresh));
+        emit RedemptionFeeConfigured(FEE);
+        fresh.configureRedemptionFee(FEE);
+        assertEq(fresh.redemptionFee(), FEE);
+
+        vm.expectRevert(WrappedBDX.RedemptionFeeAlreadyConfigured.selector);
+        fresh.configureRedemptionFee(2 * FEE);
+        vm.stopPrank();
+        assertEq(fresh.redemptionFee(), FEE, "unchanged");
+    }
+
+    /// The native maximum matches the Beldex chain's per-transaction release limit.
+    function test_NativeReleaseMax_is50kBdx() public view {
+        assertEq(w.NATIVE_RELEASE_MAX(), 50_000 * COIN);
+    }
+
+    /// No burn is accepted before the fee is configured: the signers refuse to start
+    /// without it, so such a burn would have no one to pay it.
+    function test_Redeem_withoutFeeRevertsWithoutBurning() public {
+        WrappedBDX fresh = _deploy();
+        bytes32 txid = keccak256("no-fee");
+        bytes memory sig = _sign(
+            committeePk,
+            keccak256(
+                abi.encode(fresh.MINT_TAG(), block.chainid, address(fresh), alice, 10 * COIN, txid, uint32(0))
+            )
+        );
+        fresh.mint(alice, 10 * COIN, txid, 0, sig);
+
+        vm.prank(alice);
+        vm.expectRevert(WrappedBDX.RedemptionFeeNotConfigured.selector);
+        fresh.redeemToNative(1 * COIN, "bxABC");
+        assertEq(fresh.balanceOf(alice), 10 * COIN, "nothing burned");
+    }
+
+    /// A burn at or below the fee would release nothing; it is refused before burning.
+    function test_Redeem_atOrBelowFeeRevertsWithoutBurning() public {
+        bytes32 txid = keccak256("fee-src");
+        w.mint(alice, 10 * COIN, txid, 0, _mintSig(committeePk, alice, 10 * COIN, txid));
+
+        vm.startPrank(alice);
+        vm.expectRevert(WrappedBDX.AtOrBelowRedemptionFee.selector);
+        w.redeemToNative(FEE, "bxABC");
+        vm.expectRevert(WrappedBDX.AtOrBelowRedemptionFee.selector);
+        w.redeemToNative(FEE - 1, "bxABC");
+        assertEq(w.balanceOf(alice), 10 * COIN, "nothing burned");
+
+        w.redeemToNative(FEE + 1, "bxABC");
+        vm.stopPrank();
+        assertEq(w.balanceOf(alice), 10 * COIN - FEE - 1);
+    }
+
+    /// A burn above one native release could never be paid, even within perTxMax.
+    function test_Redeem_aboveNativeMaxRevertsWithoutBurning() public {
+        bytes32 txid = keccak256("big-src");
+        w.mint(alice, PER_TX_MAX, txid, 0, _mintSig(committeePk, alice, PER_TX_MAX, txid));
+        uint256 max = w.NATIVE_RELEASE_MAX();
+        assertLt(max, PER_TX_MAX, "the case the check exists for");
+
+        vm.startPrank(alice);
+        vm.expectRevert(WrappedBDX.AboveNativeReleaseMax.selector);
+        w.redeemToNative(max + 1, "bxABC");
+        assertEq(w.balanceOf(alice), PER_TX_MAX, "nothing burned");
+
+        w.redeemToNative(max, "bxABC");
+        vm.stopPrank();
+        assertEq(w.balanceOf(alice), PER_TX_MAX - max);
     }
 
     /// A per-transaction allowance above the window budget is unreachable and hides the
